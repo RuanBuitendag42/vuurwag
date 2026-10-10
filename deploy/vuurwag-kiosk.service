@@ -40,6 +40,7 @@ UtmpMode=user
 EnvironmentFile=/etc/vuurwag/vuurwag.env
 Environment=XDG_SESSION_TYPE=wayland
 Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=PYTHONSAFEPATH=1
 WorkingDirectory=~
 ExecStart=/usr/bin/cage -- /usr/bin/foot -e /opt/vuurwag/.venv/bin/vuurwag --ssh root@127.0.0.1 --fps ${VUURWAG_FPS}
 Restart=always
