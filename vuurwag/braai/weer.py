@@ -232,10 +232,12 @@ WNEXT = {"helder": "winderig", "winderig": "bewolk", "bewolk": "reen", "reen": "
 
 
 class Weer:
-    def __init__(self, b: Braai, weather_fn=None, latlon=(-26.2, 28.0), clock_offset: float = 0.0) -> None:
+    def __init__(self, b: Braai, weather_fn=None, latlon=(-26.2, 28.0), clock_offset: float = 0.0,
+                 latlon_fn=None) -> None:
         self.b = b
         self.weather_fn = weather_fn          # () -> Weather | None (the live reading)
-        self.latlon = latlon
+        self._latlon = latlon
+        self.latlon_fn = latlon_fn            # () -> (lat, lon): follows the geocoder once it answers
         self.clock_offset = clock_offset
         self.g: dict[str, Any] = {}
         self.tod: dict[str, Any] = {"mode": "real", "phase": "", "p": 1.0, "s": 1.5, "since": 0.0, "next": 0.0,
@@ -282,6 +284,22 @@ class Weer:
         self.said: list | None = None
         self.day_tree: dict[int, Sprite] = {}
         self.install()
+
+    @property
+    def latlon(self) -> tuple[float, float]:
+        """Read every time: a first run without a cache starts on the fallback and must move to the real place
+        (sunrise, sunset) as soon as the geocoder answers."""
+        if self.latlon_fn is not None:
+            try:
+                return self.latlon_fn()
+            except Exception:  # noqa: BLE001 - the sky must never crash the braai
+                pass
+        return self._latlon
+
+    @latlon.setter
+    def latlon(self, value: tuple[float, float]) -> None:
+        self._latlon = value
+        self.latlon_fn = None
 
     # ---- the clock -------------------------------------------------------------------------------------------
     def localtime(self) -> time.struct_time:

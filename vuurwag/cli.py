@@ -73,7 +73,7 @@ def cmd_once(args: argparse.Namespace) -> int:
     print(f"{n.hostname}: up {n.uptime / 3600:.1f} h, cpu {n.cpu_pct:.0f}%, mem {n.mem_pct:.0f}%, load {n.loadavg}")
     print(f"guests: {len(snap.running_guests)} running, {len(snap.stopped_guests)} stopped")
     for g in snap.guests:
-        print(f"  {g.vmid:>4} {g.name:<18} {g.status:<8} cpu {g.cpu_pct:5.1f}%  mem {g.mem_pct:3.0f}%  tags={','.join(g.tags)}")
+        print(f"  {g.vmid:>4} {g.short_kind} {g.name:<18} {g.status:<8} cpu {g.cpu_pct:5.1f}%  mem {g.mem_pct:3.0f}%  tags={','.join(g.tags)}")
     print("disks:")
     for d in snap.disks:
         print(f"  {d.name:<8} {d.kind:<4} {d.model:<24} temp={d.temp} band={d.temp_band} healthy={d.healthy} wear={d.wear_pct}%")
@@ -96,9 +96,14 @@ def cmd_once(args: argparse.Namespace) -> int:
 
 
 def clock_offset(hhmm: str | None, date: str | None = None) -> float:
-    """Seconds to add to time.time() so the local clock reads the given date and/or HH:MM."""
+    """Seconds to add to time.time() so the local clock reads the given date and/or HH:MM.
+
+    Worked out with mktime on the target wall time, so a jump across a DST change (October -> December in
+    New York) still lands on the asked-for hour.
+    """
+    now_ts = time.time()
+    now = datetime.fromtimestamp(now_ts)
     off = 0.0
-    now = datetime.now()
     if date:
         m = re.match(r"^\s*(\d\d?)-(\d\d?)(?:[ T_](\d\d?):(\d\d)(?::(\d\d))?)?\s*$", date)
         if m:
@@ -108,14 +113,14 @@ def clock_offset(hhmm: str | None, date: str | None = None) -> float:
             try:
                 want = now.replace(month=int(mo), day=int(d), hour=int(h) % 24, minute=int(mi or 0) % 60,
                                    second=int(s or 0) % 60, microsecond=0)
-                off = (want - now).total_seconds()
+                off = time.mktime(want.timetuple()) - now_ts
             except ValueError:
                 off = 0.0
     if hhmm:
         hh, _, mm = hhmm.partition(":")
-        base = datetime.fromtimestamp(time.time() + off)
+        base = datetime.fromtimestamp(now_ts + off)
         target = base.replace(hour=int(hh) % 24, minute=int(mm or 0) % 60, second=0, microsecond=0)
-        off += (target - base).total_seconds()
+        off = time.mktime(target.timetuple()) - now_ts
     return off
 
 
