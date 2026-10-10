@@ -168,8 +168,8 @@ def geocode_candidates(place: str) -> list[tuple[str, str | None, bool]]:
 
     Open-Meteo's geocoder matches a single place name, so 'Pierre van Ryneveld, Centurion, South Africa'
     becomes 'Pierre van Ryneveld' (ZA), then 'Centurion' (ZA) as the fallback. Any country works: a name or an
-    ISO code in COUNTRIES becomes a filter; any other last part ('Lyon, France') is dropped from the search
-    (no filter) and only used to pick among the results (see country_hint).
+    ISO code in COUNTRIES becomes a filter; any other last part ('Lyon, France', 'Hatfield, Pretoria') is searched
+    last, without a filter, as the fallback town, and also used to pick among the results (see country_hint).
     """
     name, cc = split_place(place)
     hint = country_hint(place)
@@ -183,6 +183,9 @@ def geocode_candidates(place: str) -> list[tuple[str, str | None, bool]]:
         out.append((extra, cc, True))
     if len(parts) > 1 and (name, cc, False) not in out:
         out.insert(0, (name, cc, False))
+    if hint:
+        # 'Hatfield, Pretoria': the last part may be the town rather than a country - keep it as the final fallback
+        out.append((hint, None, True))
     return out or [(place, None, False)]
 
 

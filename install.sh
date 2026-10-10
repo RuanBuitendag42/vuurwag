@@ -148,7 +148,7 @@ pkg_installed() { contains "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || t
 
 DEJAVU_TTF="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
-# 0 if DejaVu Sans Mono is usable by foot; first hit wins: fontconfig, the file, the package.
+# 0 if DejaVu Sans Mono is usable by foot; first hit wins: fontconfig, the file, the fonts-dejavu-mono package.
 font_check() {
     local fam
     if command -v fc-match >/dev/null 2>&1; then
@@ -156,7 +156,9 @@ font_check() {
         case ",${fam}," in *",DejaVu Sans Mono,"*) return 0 ;; esac
     fi
     [ -f "$DEJAVU_TTF" ] && return 0
-    pkg_installed fonts-dejavu-core && return 0
+    # trixie splits Sans Mono into fonts-dejavu-mono (fonts-dejavu-core has no mono file there); on bookworm
+    # it is in -core, and the .ttf check above already covers that
+    pkg_installed fonts-dejavu-mono && return 0
     return 1
 }
 

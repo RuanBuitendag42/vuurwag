@@ -311,11 +311,32 @@ def test_geocoding_moves_the_sun(tmp_path):
 
 def test_unknown_country_searches_unfiltered_and_ranks_by_country():
     assert country_hint("Lyon, France") == "France" and country_hint("Lyon, FR") is None
-    assert geocode_candidates("Lyon, France") == [("Lyon", None, False)]
+    assert geocode_candidates("Lyon, France") == [("Lyon", None, False), ("France", None, True)]
     doc_ = {"results": [{"name": "Lyon", "latitude": 41.0, "longitude": -74.0, "country_code": "US", "country": "United States"},
                         {"name": "Lyon", "latitude": 45.76, "longitude": 4.83, "country_code": "FR", "country": "France"}]}
     assert parse_geocode(doc_, "Lyon, France").country_code == "FR"
     assert parse_geocode(doc_, "Lyon").country_code == "US"
+
+
+def test_two_part_place_without_country_falls_back_to_the_town(tmp_path):
+    assert geocode_candidates("Hatfield, Pretoria")[-1] == ("Pretoria", None, True)
+    assert geocode_candidates("Pierre van Ryneveld, Centurion")[-1] == ("Centurion", None, True)
+    forecast = json.loads((HERE / "fixtures" / "open-meteo-forecast-pretoria.json").read_text())
+    asked = []
+
+    def fetch(url: str) -> dict:
+        if "geocoding" in url:
+            asked.append(url)
+            if "name=Pretoria" in url:
+                return {"results": [{"name": "Pretoria", "latitude": -25.74, "longitude": 28.19, "country_code": "ZA",
+                                     "country": "South Africa"}]}
+            return {"results": []}
+        return forecast
+
+    svc = WeatherService(place="Hatfield, Pretoria", fetch=fetch, cache_file=tmp_path / "none.json")
+    svc.fetch_now()
+    assert svc.place.name == "Pretoria" and "name=Hatfield" in asked[0]
+    assert any("using Pretoria instead" in n for n in svc.notes)
 
 
 # ── E disks ──────────────────────────────────────────────────────────────────────────────────────────────────────

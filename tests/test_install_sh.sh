@@ -122,7 +122,9 @@ touch "$DEJAVU_TTF"
 if font_check; then ok "font: the .ttf file is enough when fontconfig disagrees"; else bad "font: file not accepted"; fi
 rm -f "$DEJAVU_TTF"
 pkg_installed() { [ "$1" = fonts-dejavu-core ]; }
-if font_check; then ok "font: the fonts-dejavu-core package is enough"; else bad "font: package not accepted"; fi
+if font_check; then bad "font: fonts-dejavu-core accepted (no Sans Mono in it on trixie)"; else ok "font: fonts-dejavu-core alone is not enough"; fi
+pkg_installed() { [ "$1" = fonts-dejavu-mono ]; }
+if font_check; then ok "font: the fonts-dejavu-mono package is enough"; else bad "font: fonts-dejavu-mono not accepted"; fi
 unset -f fc-match dpkg-query
 # shellcheck disable=SC2016  # ${Status} is dpkg-query's format field, not a shell variable
 pkg_installed() { contains "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" 'install ok installed'; }
