@@ -6,6 +6,8 @@
 # The page has no authentication: keep the port LAN/Tailscale only (install.sh adds a pve-firewall rule
 # for VUURWAG_LAN). VUURWAG_PUBLIC_URL must be the address the TV uses: textual-serve builds the page's
 # websocket URL from it.
+# Each tab is 'python -P -m vuurwag': -P and PYTHONSAFEPATH keep the cwd off sys.path, and the cwd is the
+# empty /var/lib/vuurwag, so nothing left in /opt/vuurwag by an older install can shadow the venv's package.
 #
 # Config: /etc/vuurwag/vuurwag.env   Logs: journalctl -u vuurwag-web
 
@@ -22,7 +24,9 @@ Type=simple
 User=root
 EnvironmentFile=/etc/vuurwag/vuurwag.env
 Environment=PYTHONUNBUFFERED=1
-WorkingDirectory=/opt/vuurwag
+Environment=PYTHONSAFEPATH=1
+StateDirectory=vuurwag
+WorkingDirectory=/var/lib/vuurwag
 ExecStart=/opt/vuurwag/.venv/bin/vuurwag serve --host 0.0.0.0 --port ${VUURWAG_PORT} --public-url ${VUURWAG_PUBLIC_URL} -- --fps ${VUURWAG_FPS}
 Restart=on-failure
 RestartSec=5

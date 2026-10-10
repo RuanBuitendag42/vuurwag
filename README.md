@@ -41,17 +41,21 @@ Run as root on a Proxmox VE 8 or 9 node (Python 3.11 / 3.13 are already there). 
 What lands where:
 
 - `apt-get install --no-install-recommends python3-venv smartmontools lm-sensors curl iproute2` (plus
-  `cage foot seatd fonts-dejavu` with `--monitor`). The probe calls `pvesh`, `pct`, `pvesm`, `pve-firewall`,
+  `cage foot seatd fonts-dejavu fontconfig openssh-client` with `--monitor`). The probe calls `pvesh`, `pct`, `pvesm`, `pve-firewall`,
   `pveversion`, `lsblk`, `smartctl`, `zpool`, `sensors` and `tailscale`; the last three are optional.
 - `/opt/vuurwag/src` — the source tarball of `--ref` from GitHub (swapped in whole on every run).
 - `/opt/vuurwag/.venv` — a plain `python3 -m venv`; dependencies installed from `requirements.txt`, which is
-  exported from `uv.lock` with exact versions and hashes. No uv on the node.
+  exported from `uv.lock` with exact versions and hashes (`pip --require-hashes`). No uv on the node. A venv
+  without pip (one made by `uv sync`) or for another Python version is rebuilt.
+- `/var/lib/vuurwag` — the web unit's empty working directory. Each browser tab runs `python -P -m vuurwag`
+  there, so nothing in a working directory can shadow the installed package.
 - `/etc/vuurwag/vuurwag.env` — the config (below). Written once; a rerun only changes the keys you pass as flags.
 - `/etc/systemd/system/vuurwag-web.service` and `vuurwag-kiosk.service` — always staged, enabled only by `--tv` /
   `--monitor`.
 - With `--tv`, if pve-firewall is enabled: one line under `[RULES]` in `/etc/pve/nodes/<node>/host.fw`:
   `IN ACCEPT -source <lan> -p tcp -dport <port> -log nolog # vuurwag-web`. If the firewall is off, the rule is
-  printed instead.
+  printed instead. If an `IN ACCEPT` rule for that port is already there (one you added by hand), it is left alone
+  and no second rule is added.
 - With `--monitor`: a user `vuurwag` (groups video, input, render), its ed25519 key, one restricted line in root's
   `authorized_keys`, `127.0.0.1` in its `known_hosts`, and `~vuurwag/.config/foot/foot.ini` (only if absent).
 
@@ -101,14 +105,36 @@ the node and draws it with xterm.js in the browser; one app process per open tab
 Rerun the same command. It downloads `--ref` again, reinstalls the venv's packages, keeps your config and foot.ini,
 and restarts whatever was running.
 
+### Upgrading from a hand install
+
+If vuurwag was copied onto the node by hand before this installer existed (files straight in `/opt/vuurwag`, a
+uv-made venv, units with `uv run` in them):
+
+1. On a node that is behind on updates, run `apt update && apt full-upgrade` first, so the installer's
+   `apt-get install` does not pull half an upgrade.
+2. Stop the old units: `systemctl disable --now vuurwag-web vuurwag-kiosk`.
+3. Before `--monitor`, delete the old kiosk key: `rm -f ~vuurwag/.ssh/id_ed25519*`. The installer then makes a new
+   key with the comment `vuurwag-kiosk@<node>`. If the old key stays, its line keeps its old comment, and
+   `--uninstall` will not find that line.
+4. Check `/etc/pve/priv/authorized_keys` by hand for an old, unrestricted vuurwag line and delete it. The installer
+   only edits lines for its own key and never touches lines with other keys.
+5. Run the installer **over SSH, not from a shell on tty1**: `--monitor` starts the kiosk on tty1, which takes that
+   console away from you. `--check` first shows what it will find.
+6. The installer rebuilds the pip-less venv. Only once the new install runs does it remove the old flat layout from
+   `/opt/vuurwag` (it prints every file it removes), so a failed download leaves those files where they were. It
+   overwrites the old unit files and keeps a firewall rule you added by hand for the port.
+7. Afterwards: `systemctl is-enabled getty@tty1` must say `enabled`. The old instructions disabled it; if it is
+   `disabled`, run `systemctl enable getty@tty1`, so tty1 gets a login prompt back if the kiosk ever stops.
+
 ## Uninstalling
 
 ```
 curl -fsSL https://raw.githubusercontent.com/RuanBuitendag42/vuurwag/main/install.sh | bash -s -- --uninstall
 ```
 
-Stops and disables both units, removes them, `/opt/vuurwag`, the `authorized_keys` line and the firewall rule,
-re-enables `getty@tty1`, then asks before removing the `vuurwag` user and `/etc/vuurwag` (`--yes` answers yes).
+Stops and disables both units, removes them, `/opt/vuurwag`, `/var/lib/vuurwag`, this node's `authorized_keys`
+line (`vuurwag-kiosk@<node>` only: on a cluster the file is shared, and other nodes' lines stay) and the tagged
+firewall rule, re-enables `getty@tty1`, then asks before removing the `vuurwag` user and `/etc/vuurwag` (`--yes` answers yes).
 
 ## Security
 
@@ -134,6 +160,7 @@ re-enables `getty@tty1`, then asks before removing the `vuurwag` user and `/etc/
 | Monitor shows only part of the scene (no tree, tower or bakkie) | The font in foot.ini was not installed; foot fell back to a wide font, too few columns | `apt install fonts-dejavu`, `font=DejaVu Sans Mono:size=11` for 1080p (`fc-list \| grep "DejaVu Sans Mono"` to check) |
 | Colours on the monitor look washed out | foot's default palette | Use the `[colors]` block from `deploy/foot.ini` (an existing foot.ini is never overwritten) |
 | TV cannot reach the page (times out) but `curl -I http://127.0.0.1:8787` on the node works | pve-firewall's ingress policy is DROP | `--check` shows the rule; `--tv` adds it when the firewall is enabled. By hand, under `[RULES]` in `/etc/pve/nodes/<node>/host.fw`: `IN ACCEPT -source <lan> -p tcp -dport 8787 -log nolog` |
+| TV page shows an old version after an upgrade; `install.sh` died with "No module named pip" | A hand install left a flat `/opt/vuurwag/vuurwag/` package (imported from the cwd instead of the venv) and a uv-made venv without pip | Rerun the installer: it removes the old layout, rebuilds the venv, and the web unit runs `python -P -m vuurwag` from `/var/lib/vuurwag` |
 | TV page loads, then stays black / "connecting" | `VUURWAG_PUBLIC_URL` is not an address the TV can reach (the websocket is built from it) | Rerun with `--public-url http://<address the TV uses>:8787` |
 | *"probe: geen antwoord"* in the log and a low fire | The probe failed (ssh down, node rebooting) | It retries every interval; `journalctl -u vuurwag-kiosk` |
 | Dokter Disk sees no disks | `smartctl` needs root | Run the probe as root (`--ssh root@...`, or the web unit) |
@@ -155,6 +182,7 @@ uv run vuurwag --ssh root@pve.example.lan        # real data from your node over
 uv run vuurwag --ssh root@pve.example.lan --once # one probe, a human summary, exit (--json for the Snapshot)
 uv run vuurwag serve -- --demo                   # the browser version on http://localhost:8787
 uv run pytest                                    # the tests
+bash tests/test_install_sh.sh                    # the installer's helpers (no root, changes nothing)
 ```
 
 The probe is streamed to the node over ssh as `python3 -` once per tick and needs root there; `--ssh you@node --sudo`

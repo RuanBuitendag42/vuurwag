@@ -177,7 +177,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("textual-serve is not installed (uv sync should have installed it)", file=sys.stderr)
         return 1
     app_args = [a for a in args.app_args if a != "--"]
-    cmd = " ".join([shlex.quote(sys.executable), "-m", "vuurwag"] + [shlex.quote(a) for a in app_args])
+    # -P: no cwd on sys.path, so a stray ./vuurwag/ (an old checkout) is never imported instead of this install
+    cmd = " ".join([shlex.quote(sys.executable), "-P", "-m", "vuurwag"] + [shlex.quote(a) for a in app_args])
     public = args.public_url or f"http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}"
     server = Server(cmd, host=args.host, port=args.port, title="Vuurwag - HugeBraai", public_url=public)
     print(f"vuurwag: serving `{cmd}` on http://{args.host}:{args.port} (open this on the TV's browser)")
