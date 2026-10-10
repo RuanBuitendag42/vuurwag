@@ -345,7 +345,7 @@ class Braai:
         if "bakkie" in P:
             self.AVOID.append([P["bakkie"][0], base - 7, P["bakkie"][0] + bw - 1, base])
         # A top(1) table on tall screens, low in the ground (rows base+2 .. ROWS-2, so the grass row under the feet
-        # stays clear, as in lekker): root first, then every LXC of the node, then the okes as space allows; from
+        # stays clear, as in lekker): root first, then every guest (CT or VM) of the node, then the okes as space allows; from
         # 180 columns two tables side by side, so the node's guests all fit.
         if ROWS >= 40:
             okes = sum(1 for w in ("koos", "sak", "jan", "dog") if w in P)
@@ -402,7 +402,7 @@ class Braai:
         self.run_hooks("layout", T)
 
     def guest_rows_count(self) -> int:
-        """How many LXC rows the node wants in the top(1) table (overridden by the node extra)."""
+        """How many guest rows the node wants in the top(1) table (overridden by the node extra)."""
         return 0
 
     # ---- drawing: the sky, the scenery, the ground, the status line ---------------------------------

@@ -1,11 +1,12 @@
 """Events engine: diff consecutive Snapshots and emit braai-speak events."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-from .model import Snapshot, human_bytes
+from .model import Guest, Snapshot, human_bytes
 
 
 class Severity(IntEnum):
@@ -26,6 +27,15 @@ class Event:
 
 
 SUSTAIN_TICKS = 3  # cpu-high must persist this many snapshots before it counts
+GONE_TTL = 600.0   # a guest that disappeared (deleted, migrated) is CRIT for ten minutes, then history
+
+
+def _env_pct(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return v if 0 < v <= 100 else default
 
 
 class EventEngine:
@@ -42,6 +52,13 @@ class EventEngine:
         self.first = True
         self.probe_down = False
         self.ticks = 0
+        self.last_guests: dict[int, Guest] = {}   # the last list we could trust (a failed read keeps it)
+        self.guests_seen = False
+        self.expires: dict[str, float] = {}       # active key -> snapshot time it lapses
+        self.storage_was_active: set[str] = set()
+        self.tailscale_was_online = False
+        self.storage_warn = _env_pct("VUURWAG_STORAGE_WARN", 85.0)
+        self.storage_crit = _env_pct("VUURWAG_STORAGE_CRIT", 95.0)
 
     # ── helpers ──
     def _set(self, key: str, ev: Event, out: list[Event]) -> None:
@@ -82,44 +99,15 @@ class EventEngine:
             if not snap.privileged:
                 out.append(Event("unprivileged", Severity.WARN, "probe is not root - no pvesh/smartctl data (run as root or --sudo)"))
 
-        # ── guests ──
-        prev_guests = {g.vmid: g for g in prev.guests} if prev else {}
-        for g in snap.guests:
-            pg = prev_guests.get(g.vmid)
-            if pg is not None and pg.running != g.running:
-                if g.running:
-                    out.append(Event("guest_started", Severity.INFO, f"{g.label} is back on the grid", str(g.vmid)))
-                    self._clear(f"down:{g.vmid}", out)
-                else:
-                    out.append(Event("guest_stopped", Severity.WARN, f"{g.label} came off the grid ({g.status})", str(g.vmid)))
-                    self._set(f"down:{g.vmid}", Event("guest_down", Severity.WARN, f"{g.label} is not running", str(g.vmid)), out)
-            if pg is not None and not g.running and not pg.running:
-                pass  # intentionally stopped: lives in the fridge, no nagging
-            if g.lock and (pg is None or pg.lock != g.lock):
-                out.append(Event("guest_locked", Severity.NOTICE, f"{g.label} is locked ({g.lock}) - someone is busy with it", str(g.vmid)))
-            # sustained high cpu
-            if g.running and g.cpu_pct > 80:
-                self.guest_cpu_high[g.vmid] = self.guest_cpu_high.get(g.vmid, 0) + 1
-                if self.guest_cpu_high[g.vmid] == SUSTAIN_TICKS:
-                    self._set(f"cpu:{g.vmid}", Event("guest_cpu_high", Severity.WARN,
-                                                      f"{g.label} is flaring up (cpu {g.cpu_pct:.0f} %)", str(g.vmid)), out)
-            else:
-                if self.guest_cpu_high.get(g.vmid, 0) >= SUSTAIN_TICKS:
-                    self._clear(f"cpu:{g.vmid}", out, Event("guest_cpu_ok", Severity.INFO, f"{g.label} has settled down (cpu {g.cpu_pct:.0f} %)", str(g.vmid)))
-                self.guest_cpu_high[g.vmid] = 0
-            if g.running and g.mem_pct > 92:
-                self._set(f"mem:{g.vmid}", Event("guest_mem_high", Severity.WARN, f"{g.label} is stuffed (mem {g.mem_pct:.0f} %)", str(g.vmid)), out)
-            else:
-                self._clear(f"mem:{g.vmid}", out)
-        if prev:
-            for vmid, pg in prev_guests.items():
-                if snap.guest(vmid) is None:
-                    out.append(Event("guest_vanished", Severity.CRIT, f"{pg.label} vanished from the grid entirely", str(vmid)))
-                    self._set(f"gone:{vmid}", Event("guest_gone", Severity.CRIT, f"{pg.label} is missing", str(vmid)), out)
-            for g in snap.guests:
-                if g.vmid not in prev_guests and not self.first:
-                    out.append(Event("guest_new", Severity.INFO, f"new piece on the grid: {g.label}", str(g.vmid)))
-                    self._clear(f"gone:{g.vmid}", out)
+        # ── conditions that lapse on their own ──
+        for key, until in list(self.expires.items()):
+            if snap.time >= until:
+                self.active.pop(key, None)
+                del self.expires[key]
+
+        # ── guests ── (skipped when the probe could not read them: a pvesh timeout is not every guest vanishing)
+        if "guests" not in snap.missing:
+            self._guests(snap, out)
 
         # ── node ──
         if n.cpu_pct >= 85:
@@ -180,11 +168,19 @@ class EventEngine:
         # ── storage ──
         for s in snap.storage:
             key = f"storage:{s.name}"
+            if s.active:
+                self.storage_was_active.add(s.name)
             if not s.active:
-                self._set(key, Event("storage_inactive", Severity.CRIT, f"storage {s.name} is inactive", s.name), out)
-            elif s.used_pct >= 95:
+                # one that was never up this session (a removable disk, a NAS that is off) is not news
+                if s.name in self.storage_was_active:
+                    self._set(key, Event("storage_inactive", Severity.CRIT, f"storage {s.name} is inactive", s.name), out)
+                else:
+                    self._clear(key, out)
+            elif s.archive_only:
+                self._clear(key, out)   # backups / ISOs / templates only: a full one is housekeeping
+            elif s.used_pct >= self.storage_crit:
                 self._set(key, Event("storage_full", Severity.CRIT, f"storage {s.name} is {s.used_pct:.0f} % full - the woodpile is bare!", s.name), out)
-            elif s.used_pct >= 85:
+            elif s.used_pct >= self.storage_warn:
                 self._set(key, Event("storage_high", Severity.WARN, f"storage {s.name} at {s.used_pct:.0f} % - ons het meer hout nodig", s.name), out)
             else:
                 self._clear(key, out)
@@ -209,7 +205,9 @@ class EventEngine:
                 if fin_key not in self.seen_tasks and (t.upid in self.seen_tasks or (prev is not None and t.endtime and t.endtime > prev.time - 2)):
                     self.seen_tasks.add(fin_key)
                     if t.is_backup:
-                        if t.ok:
+                        if t.warnings:
+                            out.append(Event("backup_warn", Severity.NOTICE, f"backup of {t.id or 'the node'} finished with warnings ({t.status})", t.id))
+                        elif t.ok:
                             out.append(Event("backup_ok", Severity.INFO, f"backup of {t.id or 'the node'} finished - padkos is gepak", t.id))
                         else:
                             out.append(Event("backup_failed", Severity.CRIT, f"backup of {t.id or 'the node'} FAILED: {t.status}", t.id))
@@ -218,15 +216,20 @@ class EventEngine:
         self.seen_tasks = {u for u in self.seen_tasks if u.endswith(tuple(t.upid for t in snap.tasks)) or u in {t.upid for t in snap.tasks}} if len(self.seen_tasks) > 200 else self.seen_tasks
 
         # ── network-ish ──
-        if snap.tailscale is not None:
-            if not snap.tailscale.online:
-                self._set("tailscale", Event("tailscale_down", Severity.WARN, "tailscale is offline - the gate to the plot is shut"), out)
-            else:
-                self._clear("tailscale", out, Event("tailscale_up", Severity.INFO, "tailscale is back online"))
-        if snap.firewall_running is False:
-            self._set("firewall", Event("firewall_down", Severity.CRIT, "pve-firewall is NOT running - the gate is wide open"), out)
-        elif snap.firewall_running:
+        ts = snap.tailscale
+        if ts is not None and ts.online:
+            self.tailscale_was_online = True
+            self._clear("tailscale", out, Event("tailscale_up", Severity.INFO, "tailscale is back online"))
+        elif self.tailscale_was_online:
+            # only news when it was up earlier this session; never installed or never started is a choice
+            self._set("tailscale", Event("tailscale_down", Severity.WARN, "tailscale is offline - the gate to the plot is shut"), out)
+        state = snap.firewall_state
+        if state == "fault":
+            self._set("firewall", Event("firewall_down", Severity.CRIT, "pve-firewall is enabled but NOT running - the gate is wide open"), out)
+        elif state == "on":
             self._clear("firewall", out, Event("firewall_up", Severity.INFO, "pve-firewall is running again"))
+        elif state == "off":
+            self._clear("firewall", out)   # disabled on purpose (PVE's default): no fault
         if snap.updates:
             n = snap.updates
             text = f"{n} update{'s' if n != 1 else ''} waiting" + (f": {', '.join(snap.update_packages[:3])}" if snap.update_packages else "")
@@ -249,6 +252,51 @@ class EventEngine:
         self.prev = snap
         self.first = False
         return out
+
+    def _guests(self, snap: Snapshot, out: list[Event]) -> None:
+        prev_guests = self.last_guests
+        for g in snap.guests:
+            pg = prev_guests.get(g.vmid)
+            if pg is not None and pg.running != g.running:
+                if g.running:
+                    out.append(Event("guest_started", Severity.INFO, f"{g.label} is back on the grid", str(g.vmid)))
+                else:
+                    # stopped is often on purpose (a guest in the fridge): say it once, do not nag
+                    out.append(Event("guest_stopped", Severity.WARN, f"{g.label} came off the grid ({g.status})", str(g.vmid)))
+            if g.lock and (pg is None or pg.lock != g.lock):
+                out.append(Event("guest_locked", Severity.NOTICE, f"{g.label} is locked ({g.lock}) - someone is busy with it", str(g.vmid)))
+            # sustained high cpu
+            if g.running and g.cpu_pct > 80:
+                self.guest_cpu_high[g.vmid] = self.guest_cpu_high.get(g.vmid, 0) + 1
+                if self.guest_cpu_high[g.vmid] == SUSTAIN_TICKS:
+                    self._set(f"cpu:{g.vmid}", Event("guest_cpu_high", Severity.WARN,
+                                                      f"{g.label} is flaring up (cpu {g.cpu_pct:.0f} %)", str(g.vmid)), out)
+            else:
+                if self.guest_cpu_high.get(g.vmid, 0) >= SUSTAIN_TICKS:
+                    self._clear(f"cpu:{g.vmid}", out, Event("guest_cpu_ok", Severity.INFO, f"{g.label} has settled down (cpu {g.cpu_pct:.0f} %)", str(g.vmid)))
+                self.guest_cpu_high[g.vmid] = 0
+            if g.running and g.mem_pct > 92:
+                self._set(f"mem:{g.vmid}", Event("guest_mem_high", Severity.WARN, f"{g.label} is stuffed (mem {g.mem_pct:.0f} %)", str(g.vmid)), out)
+            else:
+                self._clear(f"mem:{g.vmid}", out)
+        if self.guests_seen:
+            for vmid, pg in prev_guests.items():
+                # a kind (lxc / qemu) the probe could not list this time is unknown, not gone
+                if snap.guest(vmid) is None and pg.kind not in snap.guest_kinds_missing:
+                    out.append(Event("guest_vanished", Severity.CRIT, f"{pg.label} vanished from the grid entirely", str(vmid)))
+                    self._set(f"gone:{vmid}", Event("guest_gone", Severity.CRIT, f"{pg.label} is missing", str(vmid)), out)
+                    self.expires[f"gone:{vmid}"] = snap.time + GONE_TTL
+            for g in snap.guests:
+                if g.vmid not in prev_guests:
+                    out.append(Event("guest_new", Severity.INFO, f"new piece on the grid: {g.label}", str(g.vmid)))
+                    self._clear(f"gone:{g.vmid}", out)
+                    self.expires.pop(f"gone:{g.vmid}", None)
+        now = {g.vmid: g for g in snap.guests}
+        for vmid, pg in prev_guests.items():
+            if vmid not in now and pg.kind in snap.guest_kinds_missing:
+                now[vmid] = pg
+        self.last_guests = now
+        self.guests_seen = True
 
     # ── meter ──
     @property

@@ -99,6 +99,8 @@ DEMO_GUESTS = [
     (121, "media-addons", 2, 3, 16, ["media", "addons", "public"], True),
 ]
 
+DEMO_VMS = {111, 116}  # the rest are containers: the demo shows both kinds
+
 GiB = 1024 ** 3
 
 
@@ -198,7 +200,8 @@ class DemoRunner:
             running = self.running[vmid]
             cpu_frac = (self.guest_cpu[vmid] / 100.0) if running else 0.0
             guests.append({
-                "vmid": vmid, "name": name, "status": "running" if running else "stopped",
+                "vmid": vmid, "kind": "qemu" if vmid in DEMO_VMS else "lxc", "name": name,
+                "status": "running" if running else "stopped",
                 "cpu": cpu_frac, "cpus": cpus,
                 "mem": int(maxmem * GiB * (0.25 + 0.4 * (vmid % 5) / 5)) if running else 0,
                 "maxmem": int(maxmem * GiB), "disk": int(maxdisk * GiB * 0.3), "maxdisk": int(maxdisk * GiB),
@@ -208,9 +211,11 @@ class DemoRunner:
         total = 16 * GiB
         storage = [
             {"name": "local", "type": "dir", "active": True, "total": 72722055168,
-             "used": int(72722055168 * self.storage_used["local"] / 100), "avail": int(72722055168 * (1 - self.storage_used["local"] / 100))},
+             "used": int(72722055168 * self.storage_used["local"] / 100), "avail": int(72722055168 * (1 - self.storage_used["local"] / 100)),
+             "content": "backup,iso,vztmpl,snippets"},
             {"name": "local-lvm", "type": "lvmthin", "active": True, "total": 168824930304,
-             "used": int(168824930304 * self.storage_used["local-lvm"] / 100), "avail": int(168824930304 * (1 - self.storage_used["local-lvm"] / 100))},
+             "used": int(168824930304 * self.storage_used["local-lvm"] / 100), "avail": int(168824930304 * (1 - self.storage_used["local-lvm"] / 100)),
+             "content": "rootdir,images"},
         ]
         disks = [
             {"name": "nvme0n1", "size": "931.5G", "model": "Samsung SSD 980 PRO 1TB", "rota": False, "tran": "nvme", "nvme": True,
@@ -235,7 +240,7 @@ class DemoRunner:
             {"iface": "tailscale0", "rx_bps": rng.uniform(0, 3000), "tx_bps": rng.uniform(0, 2000)},
         ]
         return {
-            "probe_version": 1, "time": now, "privileged": True,
+            "probe_version": 2, "time": now, "privileged": True,
             "node": {
                 "hostname": "pve", "uptime": uptime, "loadavg": [round(self.cpu / 100 * 6, 2), round(self.cpu / 100 * 5.2, 2), round(self.cpu / 100 * 4.6, 2)],
                 "cpus": 6, "cpu_pct": round(self.cpu, 1), "mem_total": total, "mem_used": int(total * self.mem / 100),
@@ -243,9 +248,9 @@ class DemoRunner:
                 "pveversion": "pve-manager/9.2.21/4f6e0ac86f9e8c7f (running kernel: 7.0.14-20-pve)", "kernel": "7.0.14-20-pve",
                 "cpu_model": "Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz",
             },
-            "guests": guests, "storage": storage, "disks": disks, "zfs": None, "sensors": sensors, "network": network,
-            "tasks": list(self.tasks), "firewall": {"raw": "Status: enabled/running", "running": True},
-            "tailscale": {"online": True, "backend": "Running", "peers": 3, "peers_online": 2, "dns_name": "pve.tailnet.ts.net."},
+            "guests": guests, "guests_missing": [], "storage": storage, "disks": disks, "zfs": None, "sensors": sensors, "network": network,
+            "tasks": list(self.tasks), "firewall": {"raw": "Status: enabled/running", "enabled": True, "running": True},
+            "tailscale": {"installed": True, "online": True, "backend": "Running", "peers": 3, "peers_online": 2, "dns_name": "pve.tailnet.ts.net."},
             "updates": {"count": self.updates, "packages": ["tailscale", "pve-firmware"][: self.updates]},
             "probe_seconds": 1.2, "errors": [],
         }

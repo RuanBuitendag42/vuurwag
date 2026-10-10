@@ -1,6 +1,7 @@
 """Typed snapshot of the node, parsed from the probe's JSON document."""
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,7 @@ class Guest:
     vmid: int
     name: str
     status: str = "unknown"
+    kind: str = "lxc"  # lxc (container, CT) | qemu (virtual machine, VM)
     cpu: float = 0.0  # fraction 0..1 of the guest's allotted cores
     cpus: int = 1
     mem: int = 0
@@ -65,6 +67,11 @@ class Guest:
     def label(self) -> str:
         return f"{self.vmid} {self.name}"
 
+    @property
+    def short_kind(self) -> str:
+        """CT or VM, as Proxmox's own UI calls them."""
+        return "VM" if self.kind == "qemu" else "CT"
+
 
 @dataclass
 class Storage:
@@ -74,6 +81,13 @@ class Storage:
     total: int = 0
     used: int = 0
     avail: int = 0
+    content: str | None = None  # "rootdir,images" | "backup,iso,vztmpl,snippets" | ...
+
+    @property
+    def archive_only(self) -> bool:
+        """Holds only backups / ISOs / templates / snippets: filling it is housekeeping, not an emergency."""
+        kinds = {c.strip() for c in (self.content or "").split(",") if c.strip()}
+        return bool(kinds) and kinds <= {"backup", "iso", "vztmpl", "snippets", "import"}
 
     @property
     def used_pct(self) -> float:
@@ -195,10 +209,15 @@ class Task:
         return self.endtime is None
 
     @property
+    def warnings(self) -> bool:
+        """vzdump ends "WARNINGS: 2" when it finished with warnings: the backup is there."""
+        return bool(self.status) and str(self.status).upper().startswith("WARNINGS")
+
+    @property
     def ok(self) -> bool | None:
         if self.status is None:
             return None
-        return self.status == "OK"
+        return self.status == "OK" or self.warnings
 
     @property
     def is_backup(self) -> bool:
@@ -208,6 +227,7 @@ class Task:
 @dataclass
 class Tailscale:
     online: bool = False
+    installed: bool = True
     backend: str | None = None
     peers: int = 0
     peers_online: int = 0
@@ -236,7 +256,8 @@ class Snapshot:
     sensors: list[Sensor] = field(default_factory=list)
     network: list[Net] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
-    firewall_running: bool | None = None
+    firewall_enabled: bool | None = None   # configured on (PVE's default is off: not a fault)
+    firewall_running: bool | None = None   # the pve-firewall daemon
     tailscale: Tailscale | None = None
     updates: int | None = None
     update_packages: list[str] = field(default_factory=list)
@@ -244,6 +265,7 @@ class Snapshot:
     probe_seconds: float = 0.0
     source: str = "?"
     missing: list[str] = field(default_factory=list)  # sections the probe could not produce
+    guest_kinds_missing: list[str] = field(default_factory=list)  # "lxc" / "qemu" lists that could not be read
 
     # ── convenience ──
     @property
@@ -253,6 +275,21 @@ class Snapshot:
     @property
     def stopped_guests(self) -> list[Guest]:
         return [g for g in self.guests if not g.running]
+
+    @property
+    def guest_kinds(self) -> tuple[int, int]:
+        """(containers, VMs)"""
+        ct = sum(1 for g in self.guests if g.kind != "qemu")
+        return ct, len(self.guests) - ct
+
+    @property
+    def firewall_state(self) -> str | None:
+        """on | off (disabled on purpose) | fault (enabled but the daemon is not running) | None (unknown)"""
+        if self.firewall_enabled is None:
+            return None
+        if not self.firewall_enabled:
+            return "off"
+        return "on" if self.firewall_running else "fault"
 
     @property
     def hottest_sensor(self) -> Sensor | None:
@@ -291,6 +328,17 @@ def _i(v: Any, default: int = 0) -> int:
         return default
 
 
+def _firewall(fw: dict[str, Any]) -> tuple[bool | None, bool | None]:
+    """(enabled, running). Probe v2 reports both; a v1 document only has `raw` (and a combined `running`)."""
+    if "enabled" in fw:
+        return bool(fw.get("enabled")), bool(fw.get("running"))
+    m = re.search(r"Status:\s*(\w+)/(\w+)", str(fw.get("raw") or ""))
+    if m:
+        return m.group(1) == "enabled", m.group(2) == "running"
+    running = fw.get("running")
+    return (None, None) if running is None else (bool(running), bool(running))
+
+
 def parse_snapshot(doc: dict[str, Any], source: str = "probe") -> Snapshot:
     """Build a Snapshot from the probe's JSON. Tolerates every section being null."""
     snap = Snapshot(source=source)
@@ -322,10 +370,12 @@ def parse_snapshot(doc: dict[str, Any], source: str = "probe") -> Snapshot:
     guests = doc.get("guests")
     if guests is None:
         missing.append("guests")
+    snap.guest_kinds_missing = [str(k) for k in (doc.get("guests_missing") or [])]
     for g in guests or []:
+        kind = "qemu" if g.get("kind") == "qemu" else "lxc"
         snap.guests.append(Guest(
-            vmid=_i(g.get("vmid")), name=str(g.get("name") or f"ct{g.get('vmid')}"),
-            status=str(g.get("status") or "unknown"), cpu=_f(g.get("cpu")), cpus=_i(g.get("cpus"), 1) or 1,
+            vmid=_i(g.get("vmid")), name=str(g.get("name") or f"{'vm' if kind == 'qemu' else 'ct'}{g.get('vmid')}"),
+            status=str(g.get("status") or "unknown"), kind=kind, cpu=_f(g.get("cpu")), cpus=_i(g.get("cpus"), 1) or 1,
             mem=_i(g.get("mem")), maxmem=_i(g.get("maxmem")), disk=_i(g.get("disk")), maxdisk=_i(g.get("maxdisk")),
             netin=_i(g.get("netin")), netout=_i(g.get("netout")), uptime=_i(g.get("uptime")),
             tags=list(g.get("tags") or []), lock=g.get("lock"), pressure_cpu=_f(g.get("pressure_cpu")),
@@ -339,6 +389,7 @@ def parse_snapshot(doc: dict[str, Any], source: str = "probe") -> Snapshot:
         snap.storage.append(Storage(
             name=str(s.get("name") or "?"), type=str(s.get("type") or "?"), active=bool(s.get("active", True)),
             total=_i(s.get("total")), used=_i(s.get("used")), avail=_i(s.get("avail")),
+            content=s.get("content"),
         ))
 
     disks = doc.get("disks")
@@ -387,16 +438,15 @@ def parse_snapshot(doc: dict[str, Any], source: str = "probe") -> Snapshot:
     fw = doc.get("firewall")
     if fw is None:
         missing.append("firewall")
-        snap.firewall_running = None
     else:
-        snap.firewall_running = bool(fw.get("running"))
+        snap.firewall_enabled, snap.firewall_running = _firewall(fw)
 
     ts = doc.get("tailscale")
     if ts is None:
         missing.append("tailscale")
     else:
         snap.tailscale = Tailscale(
-            online=bool(ts.get("online")), backend=ts.get("backend"), peers=_i(ts.get("peers")),
+            online=bool(ts.get("online")), installed=bool(ts.get("installed", True)), backend=ts.get("backend"), peers=_i(ts.get("peers")),
             peers_online=_i(ts.get("peers_online")), dns_name=ts.get("dns_name"),
         )
 
