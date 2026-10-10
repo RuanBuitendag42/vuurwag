@@ -1,0 +1,32 @@
+# Vuurwag served to a browser (the TV) with textual-serve. Installed by install.sh --tv.
+#
+# Runs as root because the probe needs pvesh/pct/pvesm/smartctl; it probes LOCALLY (no ssh at all: the
+# app finds pvesh on the node itself). textual-serve starts one app process per browser tab and hands it
+# this service's environment, so VUURWAG_PLACE reaches the weather from here.
+# The page has no authentication: keep the port LAN/Tailscale only (install.sh adds a pve-firewall rule
+# for VUURWAG_LAN). VUURWAG_PUBLIC_URL must be the address the TV uses: textual-serve builds the page's
+# websocket URL from it.
+#
+# Config: /etc/vuurwag/vuurwag.env   Logs: journalctl -u vuurwag-web
+
+[Unit]
+Description=Vuurwag - a braai in ASCII for this Proxmox node (web page for the TV)
+Documentation=https://github.com/RuanBuitendag42/vuurwag
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/vuurwag/vuurwag.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/opt/vuurwag
+ExecStart=/opt/vuurwag/.venv/bin/vuurwag serve --host 0.0.0.0 --port ${VUURWAG_PORT} --public-url ${VUURWAG_PUBLIC_URL} -- --fps ${VUURWAG_FPS}
+Restart=on-failure
+RestartSec=5
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
