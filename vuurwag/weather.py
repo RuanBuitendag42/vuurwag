@@ -151,13 +151,30 @@ def split_place(place: str) -> tuple[str, str | None]:
     return place.strip(), None
 
 
+def country_hint(place: str) -> str | None:
+    """The last part of 'Town, Country' when it is not a country (or ISO code) in COUNTRIES: 'Lyon, France' ->
+    'France'. The geocoder then searches without a country filter and prefers results in that country."""
+    if "," not in place:
+        return None
+    name, cc = split_place(place)
+    if cc:
+        return None
+    tail = place.rpartition(",")[2].strip()
+    return tail or None
+
+
 def geocode_candidates(place: str) -> list[tuple[str, str | None, bool]]:
     """Names to try, most specific first: (name, country code, is_fallback).
 
     Open-Meteo's geocoder matches a single place name, so 'Pierre van Ryneveld, Centurion, South Africa'
-    becomes 'Pierre van Ryneveld' (ZA), then 'Centurion' (ZA) as the fallback.
+    becomes 'Pierre van Ryneveld' (ZA), then 'Centurion' (ZA) as the fallback. Any country works: a name or an
+    ISO code in COUNTRIES becomes a filter; any other last part ('Lyon, France', 'Hatfield, Pretoria') is searched
+    last, without a filter, as the fallback town, and also used to pick among the results (see country_hint).
     """
     name, cc = split_place(place)
+    hint = country_hint(place)
+    if hint:
+        name = place.rpartition(",")[0]
     parts = [p.strip() for p in name.split(",") if p.strip()]
     out: list[tuple[str, str | None, bool]] = []
     if parts:
@@ -166,6 +183,9 @@ def geocode_candidates(place: str) -> list[tuple[str, str | None, bool]]:
         out.append((extra, cc, True))
     if len(parts) > 1 and (name, cc, False) not in out:
         out.insert(0, (name, cc, False))
+    if hint:
+        # 'Hatfield, Pretoria': the last part may be the town rather than a country - keep it as the final fallback
+        out.append((hint, None, True))
     return out or [(place, None, False)]
 
 
@@ -188,10 +208,16 @@ def parse_geocode(doc: dict[str, Any], place: str = "") -> Place | None:
     if not results:
         return None
     _, cc = split_place(place) if place else ("", None)
+    hint = (country_hint(place) or "").lower() if place else ""
     best = results[0]
     if cc:
         for r in results:
             if str(r.get("country_code", "")).upper() == cc:
+                best = r
+                break
+    elif hint:
+        for r in results:
+            if hint in (str(r.get("country", "")).lower(), str(r.get("country_code", "")).lower()):
                 best = r
                 break
     return Place(name=str(best.get("name") or place), lat=float(best["latitude"]), lon=float(best["longitude"]),
@@ -408,8 +434,9 @@ class WeatherService:
         """Blocking fetch (runs in a thread)."""
         if self.place is None:
             place = None
+            hint = country_hint(self.place_query)
             for name, cc, fallback in geocode_candidates(self.place_query):
-                place = parse_geocode(self.fetch(geocode_url(name, cc)), f"{name}, {cc}" if cc else name)
+                place = parse_geocode(self.fetch(geocode_url(name, cc)), f"{name}, {cc or hint}" if (cc or hint) else name)
                 if place is not None:
                     if fallback:
                         self.notes.append(f"weather: Open-Meteo does not know '{self.place_query}', using {place.name} instead")

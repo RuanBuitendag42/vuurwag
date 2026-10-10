@@ -11,6 +11,7 @@
 #   --port N          web port (default 8787)
 #   --lan CIDR        LAN allowed to the web port (default: the network of the node's primary interface)
 #   --public-url URL  URL the browser uses (default: http://<node ip>:<port>)
+#   --bind IP         address the web page listens on (default 0.0.0.0, every address; opt-in to narrow it)
 #   --fps N           frames a second, 1-20 (default 10; 4 for slow TV browsers)
 #   --ref REF         git ref to install (default main)
 #   --check           preflight and status only; changes nothing
@@ -40,7 +41,7 @@ BASE_PKGS=(python3 python3-venv smartmontools lm-sensors curl ca-certificates ip
 MONITOR_PKGS=(cage foot seatd fonts-dejavu fontconfig openssh-client)
 
 OPT_TV=0 OPT_MONITOR=0 OPT_CHECK=0 OPT_UNINSTALL=0 OPT_YES=0 OPT_NO_PVE=0
-OPT_PLACE="" OPT_PORT="" OPT_LAN="" OPT_PUBLIC_URL="" OPT_FPS="" OPT_REF="main" OPT_LOCAL_SRC=""
+OPT_PLACE="" OPT_PORT="" OPT_LAN="" OPT_PUBLIC_URL="" OPT_FPS="" OPT_REF="main" OPT_LOCAL_SRC="" OPT_BIND=""
 NODE_IP="" NODE_LAN="" NODE_NAME=""
 FAILED=0
 KIOSK_STARTING=0
@@ -61,6 +62,7 @@ Vuurwag installer - run as root on the Proxmox node:
   --lan CIDR        LAN allowed to the web port   --public-url U  URL the browser uses
   --fps N           frames a second, 1-20         --ref REF       git ref (default main)
   --check           status only, changes nothing  --uninstall     remove vuurwag (--yes: no questions)
+  --bind IP         web listen address (default 0.0.0.0 = every address, Tailscale included)
   --no-pve-check    allow non-Proxmox hosts       --local-src P   install from a dir or .tar.gz
 No flags: install the files and the venv, enable nothing, print the next steps.
 EOF
@@ -79,6 +81,7 @@ parse_args() {
             --port) [ $# -ge 2 ] || die "--port needs a value"; OPT_PORT="$2"; shift ;;
             --lan) [ $# -ge 2 ] || die "--lan needs a value"; OPT_LAN="$2"; shift ;;
             --public-url) [ $# -ge 2 ] || die "--public-url needs a value"; OPT_PUBLIC_URL="$2"; shift ;;
+            --bind) [ $# -ge 2 ] || die "--bind needs a value"; OPT_BIND="$2"; shift ;;
             --fps) [ $# -ge 2 ] || die "--fps needs a value"; OPT_FPS="$2"; shift ;;
             --ref) [ $# -ge 2 ] || die "--ref needs a value"; OPT_REF="$2"; shift ;;
             --local-src) [ $# -ge 2 ] || die "--local-src needs a value"; OPT_LOCAL_SRC="$2"; shift ;;
@@ -92,6 +95,12 @@ parse_args() {
     fi
     if [ -n "$OPT_FPS" ]; then
         [[ "$OPT_FPS" =~ ^[0-9]+$ ]] && [ "$OPT_FPS" -ge 1 ] && [ "$OPT_FPS" -le 20 ] || die "--fps must be 1-20"
+    fi
+    if [ -n "$OPT_BIND" ] && ! valid_bind "$OPT_BIND"; then
+        die "--bind must be an IPv4 or IPv6 address of this node (or 0.0.0.0 for every address)"
+    fi
+    if [ -n "$OPT_PLACE" ] && is_placeholder_place "$OPT_PLACE"; then
+        die "--place \"${OPT_PLACE}\" is the README's placeholder: pass your own town, e.g. --place \"Bloemfontein, South Africa\""
     fi
     case "$OPT_PLACE" in
         *[\"\\\$\`]* | *$'\n'* | *$'\r'*) die "--place may not contain quotes, backslashes, \$, backticks or newlines" ;;
@@ -130,7 +139,47 @@ unit_state() {  # unit -> "enabled/active" style summary, or "n/a"
     echo "${en:-unknown}/${ac:-unknown}"
 }
 
-pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# Never 'cmd | grep -q' in this script: with pipefail, grep -q exits at the first match, cmd dies of SIGPIPE
+# (141) and the pipeline counts as failed. That is how a long fc-list "lost" an installed font on a real node.
+# Capture the output first, then match.
+contains() { [[ "$1" == *"$2"* ]]; }
+
+pkg_installed() { contains "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" 'install ok installed'; }
+
+DEJAVU_TTF="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+
+# 0 if DejaVu Sans Mono is usable by foot; first hit wins: fontconfig, the file, the fonts-dejavu-mono package.
+font_check() {
+    local fam
+    if command -v fc-match >/dev/null 2>&1; then
+        fam="$(fc-match -f '%{family}' 'DejaVu Sans Mono' 2>/dev/null || true)"
+        case ",${fam}," in *",DejaVu Sans Mono,"*) return 0 ;; esac
+    fi
+    [ -f "$DEJAVU_TTF" ] && return 0
+    # trixie splits Sans Mono into fonts-dejavu-mono (fonts-dejavu-core has no mono file there); on bookworm
+    # it is in -core, and the .ttf check above already covers that
+    pkg_installed fonts-dejavu-mono && return 0
+    return 1
+}
+
+font_diagnose() {  # so the next failure can be read from the output
+    local out
+    if command -v fc-list >/dev/null 2>&1; then
+        out="$(fc-list 2>&1 || true)"
+        info "  fc-list says (first 5 lines, stderr included):"
+        printf '%s\n' "$out" | head -n 5 | sed 's/^/     /' || true
+    else
+        info "  fc-list is not installed (apt install fontconfig)"
+    fi
+    info "  fc-match 'DejaVu Sans Mono' -> $(fc-match 'DejaVu Sans Mono' 2>&1 || echo 'n/a'); ${DEJAVU_TTF}: $([ -f "$DEJAVU_TTF" ] && echo present || echo absent)"
+}
+
+# The README's example town, pasted literally, must not end up as the weather.
+is_placeholder_place() {
+    local first="${1%%,*}"
+    first="$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ "$first" = "your town" ]
+}
 
 python_ok() { python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; }
 
@@ -183,9 +232,16 @@ detect_network() {
 
 fw_file() { echo "/etc/pve/nodes/${NODE_NAME}/host.fw"; }
 
-fw_enabled() { command -v pve-firewall >/dev/null 2>&1 && pve-firewall status 2>/dev/null | grep -q 'enabled'; }
+# "Status: enabled/running" -> 0; "disabled/..." or no pve-firewall -> 1
+fw_enabled() { command -v pve-firewall >/dev/null 2>&1 && contains "$(pve-firewall status 2>/dev/null || true)" 'Status: enabled'; }
 
 fw_rule() { echo "IN ACCEPT -source $1 -p tcp -dport $2 -log nolog ${FW_TAG}"; }
+
+# ip -> 0 if it is a plain IPv4 or IPv6 address (no brackets, no port)
+valid_bind() {
+    local v4='^([0-9]{1,3}\.){3}[0-9]{1,3}$' v6='^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*$'
+    [[ "$1" =~ $v4 || "$1" =~ $v6 ]]
+}
 
 # url -> 0 if it is http(s)://host[:port][/path]; host is a name, an IPv4 or a bracketed [IPv6].
 # Kept in a variable: inside [[ =~ ]] a literal '\]' in a bracket set ends the set early.
@@ -200,7 +256,7 @@ valid_public_url() {
 #   add                neither: fw_merge it
 fw_plan() {
     awk -v rule="$1" -v port="$2" -v tag="$FW_TAG" '
-        $0 == rule { found = "present"; exit }
+        $0 == rule { found = "present" }
         /^[[:space:]]*#/ { next }
         index($0, tag) > 0 { next }
         $0 ~ /^[[:space:]]*IN[[:space:]]+ACCEPT([[:space:]]|$)/ && $0 ~ ("-dport[[:space:]]+" port "([[:space:]]|$)") {
@@ -326,6 +382,35 @@ default_place() {
     "${VENV}/bin/python" -c 'from vuurwag.weather import DEFAULT_PLACE; print(DEFAULT_PLACE)' 2>/dev/null || true
 }
 
+# the address vuurwag-web listens on: --bind if given, else every address. 0.0.0.0 keeps the page reachable over
+# Tailscale and survives a DHCP change of the node's address; --bind IP narrows it (opt-in).
+default_bind() {
+    if [ -n "$OPT_BIND" ]; then echo "$OPT_BIND"; return 0; fi
+    echo "0.0.0.0"
+}
+
+# the loud line for a page without login that pve-firewall does not guard
+fw_unguarded_warning() {  # port
+    local where
+    where="$(env_get VUURWAG_BIND)"; where="${where:-0.0.0.0}"
+    if command -v pve-firewall >/dev/null 2>&1; then
+        warn "pve-firewall is DISABLED on this node: the page (no login) is open to every network that can reach ${where}:$1."
+    else
+        warn "no pve-firewall found: the page (no login) is open to every network that can reach ${where}:$1."
+    fi
+    warn "  Keep it on a trusted LAN or Tailscale, or narrow it with --bind IP."
+}
+
+warn_place() {  # the place we ended up with -> a loud line when it is the default or the README placeholder
+    local place="$1" def
+    def="$(default_place)"
+    if is_placeholder_place "$place"; then
+        warn "weather place is the README placeholder '${place}': rerun with --place \"Town, Country\" (your own town)"
+    elif [ -z "$OPT_PLACE" ] && [ "$place" = "$def" ]; then
+        warn "weather place not set: using ${place}; rerun with --place \"Town, Country\""
+    fi
+}
+
 write_env() {
     install -d -m 0755 "$ETC_DIR"
     local port="${OPT_PORT:-8787}"
@@ -333,6 +418,8 @@ write_env() {
     if [ ! -f "$ENV_FILE" ]; then
         say "writing ${ENV_FILE}"
         local place="${OPT_PLACE:-$(default_place)}"
+        local bind
+        bind="$(default_bind)"
         local tmp
         tmp="$(mktemp "${ETC_DIR}/.vuurwag.env.XXXXXX")"
         cat >"$tmp" <<EOF
@@ -344,6 +431,8 @@ write_env() {
 VUURWAG_PLACE="${place}"
 # Port of the web page for the TV (vuurwag-web).
 VUURWAG_PORT="${port}"
+# The address vuurwag-web listens on (0.0.0.0 = every network the node is on; the page has no login).
+VUURWAG_BIND="${bind}"
 # The LAN allowed to that port through pve-firewall (the installer's host rule).
 VUURWAG_LAN="${OPT_LAN:-${NODE_LAN:-}}"
 # The URL the browser uses to reach the page; textual-serve builds its websocket URL from it.
@@ -363,8 +452,19 @@ EOF
             env_set VUURWAG_PUBLIC_URL "$url"
         fi
         if [ -z "$(env_get VUURWAG_LAN)" ] && [ -n "$NODE_LAN" ]; then env_set VUURWAG_LAN "$NODE_LAN"; fi
+        # keys added since the first release: fill them in once, never overwrite what is there
+        if [ -n "$OPT_BIND" ] || ! grep -q '^VUURWAG_BIND=' "$ENV_FILE"; then env_set VUURWAG_BIND "$(default_bind)"; fi
+        if [ -z "$(env_get VUURWAG_PLACE)" ]; then env_set VUURWAG_PLACE "$(default_place)"; fi
     fi
+    warn_place "$(env_get VUURWAG_PLACE)"
     sed 's/^/   | /' "$ENV_FILE" | grep -v '^   | #' | grep -v '^   | $' || true
+}
+
+# the address to test the page on: the bind address, or loopback when it listens everywhere
+web_probe_host() {
+    local b
+    b="$(env_get VUURWAG_BIND)"
+    case "$b" in ""|0.0.0.0|::) echo 127.0.0.1 ;; *:*) echo "[$b]" ;; *) echo "$b" ;; esac
 }
 
 install_units() {
@@ -388,7 +488,8 @@ firewall_add() {
     rule="$(fw_rule "$lan" "$port")"
     file="$(fw_file)"
     if ! fw_enabled; then
-        info "pve-firewall is not enabled here; if you enable it, add under [RULES] in ${file}:"
+        fw_unguarded_warning "$port"
+        info "with pve-firewall enabled, this rule under [RULES] in ${file} would admit only the LAN:"
         info "  ${rule}"
         return 0
     fi
@@ -436,16 +537,17 @@ enable_web() {
     fi
     systemctl enable vuurwag-web >/dev/null 2>&1
     systemctl restart vuurwag-web
-    local port i
+    local port i host
     port="$(env_get VUURWAG_PORT)"
+    host="$(web_probe_host)"
     for i in $(seq 1 20); do
-        if curl -fsI --max-time 2 "http://127.0.0.1:${port}" >/dev/null 2>&1; then
-            info "ok: answering on port ${port} after ${i}s"
+        if curl -fsI --max-time 2 "http://${host}:${port}" >/dev/null 2>&1; then
+            info "ok: answering on ${host}:${port} after ${i}s"
             return 0
         fi
         sleep 1
     done
-    warn "vuurwag-web did not answer on 127.0.0.1:${port} within 20 s; see: journalctl -u vuurwag-web -n 50"
+    warn "vuurwag-web did not answer on ${host}:${port} within 20 s; see: journalctl -u vuurwag-web -n 50"
     FAILED=1
 }
 
@@ -520,10 +622,9 @@ kiosk_preflight() {
     for b in cage foot seatd; do
         if ! command -v "$b" >/dev/null 2>&1; then info "preflight: ${b} is not installed"; bad=1; fi
     done
-    if ! command -v fc-list >/dev/null 2>&1; then
-        info "preflight: fc-list not found, cannot check the font (apt install fontconfig)"; bad=1
-    elif ! fc-list 2>/dev/null | grep -q 'DejaVu Sans Mono'; then
-        info "preflight: DejaVu Sans Mono not found (apt install fonts-dejavu)"; bad=1
+    if ! font_check; then
+        info "preflight: DejaVu Sans Mono not found (apt install fonts-dejavu fontconfig; fc-cache -f)"; bad=1
+        font_diagnose
     fi
     if [ ! -e /dev/tty1 ]; then info "preflight: there is no /dev/tty1"; bad=1; fi
     if ! have_systemd; then
@@ -659,13 +760,23 @@ do_check() {
         else
             info "firewall rule: absent (would be: $(fw_rule "$lan" "$port"))"
         fi
+        if ! fw_enabled; then fw_unguarded_warning "$port" 2>&1; fi
     else
         info "pve-firewall: not found"
+        fw_unguarded_warning "$port" 2>&1
     fi
-    if command -v curl >/dev/null 2>&1 && curl -fsI --max-time 2 "http://127.0.0.1:${port}" >/dev/null 2>&1; then
-        info "web: answering on 127.0.0.1:${port} -> $(env_get VUURWAG_PUBLIC_URL)"
+    local host place
+    host="$(web_probe_host)"
+    if command -v curl >/dev/null 2>&1 && curl -fsI --max-time 2 "http://${host}:${port}" >/dev/null 2>&1; then
+        info "web: answering on ${host}:${port} -> $(env_get VUURWAG_PUBLIC_URL)"
     else
-        info "web: nothing answering on 127.0.0.1:${port}"
+        info "web: nothing answering on ${host}:${port}"
+    fi
+    place="$(env_get VUURWAG_PLACE)"
+    if is_placeholder_place "$place"; then
+        info "weather place: '${place}' is the README placeholder - rerun with --place \"Town, Country\""
+    elif [ -n "$place" ]; then
+        info "weather place: ${place}"
     fi
     if kiosk_preflight; then info "monitor preflight: ok"; else info "monitor preflight: not ready (the reasons above); --monitor would refuse to enable the kiosk"; fi
     return 0
@@ -748,6 +859,10 @@ do_install() {
     local pkgs=("${BASE_PKGS[@]}")
     [ "$OPT_MONITOR" = 0 ] || pkgs+=("${MONITOR_PKGS[@]}")
     apt_install "${pkgs[@]}"
+    if [ "$OPT_MONITOR" = 1 ] && command -v fc-cache >/dev/null 2>&1; then
+        # a font that was just unpacked is not in fontconfig's cache until this runs
+        fc-cache -f >/dev/null 2>&1 || warn "fc-cache -f failed; the font check may not see DejaVu Sans Mono"
+    fi
     python_ok || die "python3 >= 3.11 is still not available after apt"
     detect_network
     fetch_source

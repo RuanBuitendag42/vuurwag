@@ -2,6 +2,7 @@
 """vuurwag probe - runs ON the Proxmox host and prints one JSON document.
 
 Standard library only, so it can be streamed over ssh as `python3 - < probe.py`.
+Containers and VMs both count as guests (`kind` lxc | qemu).
 Every section is optional: a missing tool or a failing command yields `null`
 for that section (plus a note in `errors`), never a crash. Must run as root
 for pvesh/pct/smartctl to return anything useful; as a normal user the node
@@ -20,7 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
 PATH_EXTRA = ("/usr/sbin", "/sbin", "/usr/local/sbin", "/usr/local/bin")
 ERRORS: list[str] = []
 
@@ -75,6 +76,27 @@ def read(path: str) -> str | None:
 # ───────────────────────────── node ─────────────────────────────
 
 
+def node_name(nodename_file: str = "/etc/pve/nodename", local_link: str = "/etc/pve/local") -> str:
+    """The Proxmox node name for /nodes/<name>/... - never an FQDN.
+
+    /etc/pve/nodename if present, then the /etc/pve/local symlink (-> nodes/<name>), then the short hostname.
+    """
+    try:
+        with open(nodename_file, encoding="utf-8") as fh:
+            name = fh.read().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    try:
+        name = os.path.basename(os.readlink(local_link).rstrip("/"))
+        if name:
+            return name
+    except OSError:
+        pass
+    return socket.gethostname().split(".")[0]
+
+
 def _cpu_sample() -> tuple[int, int] | None:
     stat = read("/proc/stat")
     if not stat:
@@ -86,7 +108,7 @@ def _cpu_sample() -> tuple[int, int] | None:
 
 
 def node_section(cpu_a: tuple[int, int] | None, cpu_b: tuple[int, int] | None) -> dict[str, Any]:
-    out: dict[str, Any] = {"hostname": socket.gethostname()}
+    out: dict[str, Any] = {"hostname": node_name(), "fqdn": socket.gethostname()}
     up = read("/proc/uptime")
     out["uptime"] = float(up.split()[0]) if up else None
     la = read("/proc/loadavg")
@@ -135,41 +157,67 @@ def node_section(cpu_a: tuple[int, int] | None, cpu_b: tuple[int, int] | None) -
 # ───────────────────────────── guests ─────────────────────────────
 
 
-def guests_section(host: str) -> list[dict[str, Any]] | None:
-    data = run_json(["pvesh", "get", f"/nodes/{host}/lxc", "--output-format", "json"], 8)
+def _guest_row(g: dict[str, Any], kind: str) -> dict[str, Any]:
+    return {
+        "vmid": int(g.get("vmid", 0)),
+        "kind": kind,
+        "name": g.get("name"),
+        "status": g.get("status"),
+        "cpu": float(g.get("cpu") or 0.0),       # fraction of one core * cpus (0..1)
+        "cpus": int(g.get("cpus") or 0),
+        "mem": int(g.get("mem") or 0),
+        "maxmem": int(g.get("maxmem") or 0),
+        "swap": int(g.get("swap") or 0),
+        "disk": int(g.get("disk") or 0),
+        "maxdisk": int(g.get("maxdisk") or 0),
+        "netin": int(g.get("netin") or 0),
+        "netout": int(g.get("netout") or 0),
+        "uptime": int(g.get("uptime") or 0),
+        "tags": [t for t in str(g.get("tags") or "").split(";") if t],
+        "lock": g.get("lock"),
+        "pressure_cpu": float(g.get("pressurecpusome") or 0.0),
+    }
+
+
+def parse_pct_list(txt: str) -> list[dict[str, Any]]:
+    """`pct list`: VMID Status [Lock] Name"""
+    rows = []
+    for line in txt.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit():
+            rows.append({"vmid": int(parts[0]), "kind": "lxc", "status": parts[1], "name": parts[-1]})
+    return rows
+
+
+def parse_qm_list(txt: str) -> list[dict[str, Any]]:
+    """`qm list`: VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID"""
+    rows = []
+    for line in txt.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit():
+            rows.append({"vmid": int(parts[0]), "kind": "qemu", "name": parts[1], "status": parts[2]})
+    return rows
+
+
+def guests_kind(host: str, kind: str) -> list[dict[str, Any]] | None:
+    """One kind of guest (lxc | qemu) from pvesh, falling back to pct/qm list (names and states only)."""
+    data = run_json(["pvesh", "get", f"/nodes/{host}/{kind}", "--output-format", "json"], 8)
     if data is None:
-        # fall back to pct list (no cpu/mem but at least names and states)
-        txt = run(["pct", "list"], 6)
+        txt = run(["pct" if kind == "lxc" else "qm", "list"], 6)
         if txt is None:
             return None
-        rows = []
-        for line in txt.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 3 and parts[0].isdigit():
-                rows.append({"vmid": int(parts[0]), "status": parts[1], "name": parts[-1]})
-        return rows
-    guests = []
-    for g in data:
-        guests.append({
-            "vmid": int(g.get("vmid", 0)),
-            "name": g.get("name"),
-            "status": g.get("status"),
-            "cpu": float(g.get("cpu") or 0.0),       # fraction of one core * cpus (0..1)
-            "cpus": int(g.get("cpus") or 0),
-            "mem": int(g.get("mem") or 0),
-            "maxmem": int(g.get("maxmem") or 0),
-            "swap": int(g.get("swap") or 0),
-            "disk": int(g.get("disk") or 0),
-            "maxdisk": int(g.get("maxdisk") or 0),
-            "netin": int(g.get("netin") or 0),
-            "netout": int(g.get("netout") or 0),
-            "uptime": int(g.get("uptime") or 0),
-            "tags": [t for t in str(g.get("tags") or "").split(";") if t],
-            "lock": g.get("lock"),
-            "pressure_cpu": float(g.get("pressurecpusome") or 0.0),
-        })
+        return parse_pct_list(txt) if kind == "lxc" else parse_qm_list(txt)
+    return [_guest_row(g, kind) for g in data]
+
+
+def merge_guests(lxc: list[dict[str, Any]] | None, qemu: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    """Both kinds in one list; the kinds that could not be read are returned so nobody mistakes them for gone."""
+    missing = [k for k, rows in (("lxc", lxc), ("qemu", qemu)) if rows is None]
+    if len(missing) == 2:
+        return None, missing
+    guests = (lxc or []) + (qemu or [])
     guests.sort(key=lambda r: r["vmid"])
-    return guests
+    return guests, missing
 
 
 # ───────────────────────────── storage ─────────────────────────────
@@ -228,7 +276,8 @@ def disks_section() -> list[dict[str, Any]] | None:
         if dev.get("type") != "disk":
             continue
         name = dev["name"]
-        if name.startswith(("loop", "zram", "ram", "sr")):
+        # zvols, ceph/nbd/drbd devices, device-mapper and md arrays are not drives Dokter Disk can examine
+        if name.startswith(("loop", "zram", "ram", "sr", "zd", "rbd", "nbd", "drbd", "dm-", "md")):
             continue
         d: dict[str, Any] = {
             "name": name,
@@ -371,28 +420,54 @@ def tasks_section(host: str) -> list[dict[str, Any]] | None:
     return rows
 
 
+def parse_firewall(txt: str) -> dict[str, Any]:
+    """`pve-firewall status` -> enabled (configured on) and running (the daemon) separately.
+
+    "Status: enabled/running", "Status: disabled/running", "Status: enabled/stopped", "Status: disabled/stopped".
+    PVE ships the firewall disabled; that is a choice, not a fault.
+    """
+    txt = txt.strip()
+    m = re.search(r"Status:\s*(\w+)/(\w+)", txt)
+    if m:
+        enabled, running = m.group(1) == "enabled", m.group(2) == "running"
+    else:
+        enabled, running = "enabled" in txt and "disabled" not in txt, "running" in txt and "stopped" not in txt
+    return {"raw": txt, "enabled": enabled, "running": running}
+
+
 def firewall_section() -> dict[str, Any] | None:
     txt = run(["pve-firewall", "status"], 5)
     if txt is None:
         return None
-    txt = txt.strip()
-    return {"raw": txt, "running": "running" in txt and "enabled" in txt}
+    return parse_firewall(txt)
 
 
-def tailscale_section() -> dict[str, Any] | None:
-    data = run_json(["tailscale", "status", "--json"], 6)
-    if data is None:
-        return None
+def parse_tailscale(data: dict[str, Any]) -> dict[str, Any]:
     peers = data.get("Peer") or {}
     self_ = data.get("Self") or {}
+    backend = data.get("BackendState")
+    # older tailscale has no Self.Online: then Running is as good as it gets
+    online = bool(self_["Online"]) and backend == "Running" if "Online" in self_ else backend == "Running"
     return {
-        "backend": data.get("BackendState"),
-        "online": bool(self_.get("Online")) and data.get("BackendState") == "Running",
+        "installed": True,
+        "backend": backend,
+        "online": online,
         "ips": data.get("TailscaleIPs") or [],
         "dns_name": self_.get("DNSName"),
         "peers": len(peers),
         "peers_online": sum(1 for p in peers.values() if p.get("Online")),
     }
+
+
+def tailscale_section() -> dict[str, Any] | None:
+    """None when tailscale is not installed (not a fault); installed but not answering = backend Stopped."""
+    if shutil.which("tailscale", path=_env()["PATH"]) is None:
+        return None
+    data = run_json(["tailscale", "status", "--json"], 6)
+    if data is None:
+        return {"installed": True, "backend": "Stopped", "online": False, "ips": [], "dns_name": None,
+                "peers": 0, "peers_online": 0}
+    return parse_tailscale(data)
 
 
 def updates_section(host: str) -> dict[str, Any] | None:
@@ -407,7 +482,7 @@ def updates_section(host: str) -> dict[str, Any] | None:
 
 def collect() -> dict[str, Any]:
     t0 = time.monotonic()
-    host = socket.gethostname()
+    host = node_name()
     privileged = os.geteuid() == 0
     doc: dict[str, Any] = {"probe_version": PROBE_VERSION, "time": time.time(), "privileged": privileged}
     # Sample cpu and network in a quiet half second BEFORE the pvesh storm below,
@@ -420,7 +495,8 @@ def collect() -> dict[str, Any]:
     doc["node"] = node_section(cpu_a, cpu_b)
     doc["network"] = network_section(net_a, net_b, 0.5)
     jobs = {
-        "guests": lambda: guests_section(host),
+        "lxc": lambda: guests_kind(host, "lxc"),
+        "qemu": lambda: guests_kind(host, "qemu"),
         "storage": lambda: storage_section(host),
         "disks": disks_section,
         "zfs": zfs_section,
@@ -439,6 +515,7 @@ def collect() -> dict[str, Any]:
             except Exception as exc:  # pragma: no cover - defensive
                 ERRORS.append(f"{name}: {exc}")
                 doc[name] = None
+    doc["guests"], doc["guests_missing"] = merge_guests(doc.pop("lxc"), doc.pop("qemu"))
     doc["probe_seconds"] = round(time.monotonic() - t0, 2)
     doc["errors"] = ERRORS
     return doc

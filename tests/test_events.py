@@ -37,8 +37,9 @@ def test_guest_stop_and_start():
         if g["vmid"] == 102:
             g["status"] = "stopped"
     evs = eng.update(parse_snapshot(d2))
-    assert "guest_stopped" in kinds(evs) and "guest_down" in kinds(evs)
-    assert eng.mood() == "OKAY-ISH"
+    # stopping a guest is often on purpose: said once, not a standing condition
+    assert "guest_stopped" in kinds(evs) and "guest_down" not in kinds(evs)
+    assert "down:102" not in eng.active
     evs = eng.update(parse_snapshot(d))
     assert "guest_started" in kinds(evs)
     assert "down:102" not in eng.active
@@ -121,7 +122,7 @@ def test_hdd_thresholds_are_lower():
 def test_storage_levels():
     eng = EventEngine()
     d = doc()
-    s = d["storage"][0]
+    s = d["storage"][1]   # local-lvm holds the guests; storage[0] is backup/iso only and may fill up
     s["used"] = int(s["total"] * 0.9)
     evs = eng.update(parse_snapshot(d))
     assert "storage_high" in kinds(evs)
@@ -158,15 +159,16 @@ def test_backup_lifecycle():
 def test_tailscale_firewall_probe_down():
     eng = EventEngine()
     d = doc()
+    eng.update(parse_snapshot(d))              # tailscale seen online once this session
     d["tailscale"]["online"] = False
-    d["firewall"]["running"] = False
+    d["firewall"] = {"raw": "Status: enabled/stopped", "enabled": True, "running": False}
     evs = eng.update(parse_snapshot(d))
     assert "tailscale_down" in kinds(evs) and "firewall_down" in kinds(evs)
     assert eng.mood() == "GATVOL"
     evs = eng.probe_failed("ssh: connection refused")
     assert kinds(evs) == ["probe_down"] and evs[0].severity == Severity.CRIT
     d["tailscale"]["online"] = True
-    d["firewall"]["running"] = True
+    d["firewall"] = {"raw": "Status: enabled/running", "enabled": True, "running": True}
     evs = eng.update(parse_snapshot(d))
     assert kinds(evs)[0] == "probe_up"
     assert "tailscale_up" in kinds(evs) and "firewall_up" in kinds(evs)
@@ -178,7 +180,7 @@ def test_sayings_cover_every_event_kind():
         "guest_new", "node_cpu_high", "node_cpu_ok", "node_load_high", "node_mem_high", "node_mem_ok", "node_swap_high",
         "reboot", "sensor_hot", "sensor_warm", "sensor_ok", "disk_warm", "disk_hot", "disk_cool", "disk_unhealthy",
         "disk_worn", "storage_high", "storage_full", "storage_inactive", "zpool_degraded", "backup_started", "backup_ok",
-        "backup_failed", "task_failed", "tailscale_down", "tailscale_up", "firewall_down", "firewall_up", "updates",
+        "backup_failed", "backup_warn", "task_failed", "tailscale_down", "tailscale_up", "firewall_down", "firewall_up", "updates",
         "net_busy", "probe_down", "probe_up", "unprivileged", "sizzle", "guest_locked",
     }
     missing = eng_kinds - set(SAYINGS)

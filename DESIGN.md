@@ -174,12 +174,12 @@ Shared state between extras is the same as lekker's: `P`, `ST`, `SAYS`, `talk_q`
 - Meat pieces: 1..4 per batch from the running guests (`MEAT_LAYOUTS`); `MEAT[-1]` is the brakkie's piece.
 - **The top(1) table height rule** (lekker's table, with the node's guests taking precedence): shown at >= 40 rows,
   in the ground rows `base+2 .. ROWS-2` (`gd - 1` rows, header included; the grass row under the feet stays clear,
-  as in lekker). The data rows are, in this order, `1 root braaid` (only when `gd >= 7`, as lekker), **every LXC**
+  as in lekker). The data rows are, in this order, `1 root braaid` (only when `gd >= 7`, as lekker), **every guest** (containers and VMs, `lxc` or `qemu` in the COMMAND column)
   (running ones sorted by cpu, then the stopped ones), then the okes (koos, sakkie, jannie, wagter) as space
   allows. From 158 columns (`2 * 69 + 20`, i.e. at 160x45 and up) the table is two tables side by side (each with
   its header, 2 columns apart), so a node with up to `2 * (gd - 2)` rows shows everything: at 160x45 that is 10 data
-  rows (the live node: root, 7 LXCs, 2 okes), at 200x55 14 (root, 10 LXCs, 3 okes). Under 158 columns one table:
-  at 120x40 four rows, i.e. the busiest LXCs and no okes. The table is laid out again when the guest count changes;
+  rows (the live node: root, 7 guests, 2 okes), at 200x55 14 (root, 10 guests, 3 okes). Under 158 columns one table:
+  at 120x40 four rows, i.e. the busiest guests and no okes. The table is laid out again when the guest count changes;
   the plaasdam and kraal make way for it.
 - `fill()`: extras register placeholders; the ten-minute no-repeat rule applies to `PRIO` exchanges too (the serving
   line always plays).
@@ -235,8 +235,8 @@ Shared state between extras is the same as lekker's: `P`, `ST`, `SAYS`, `talk_q`
 
 - **The node, in lekker's idiom** (`braai/node.py`): the CPU drives the fire exactly as lekker's `/proc/stat` did;
   load and uptime stamp the log and the status line (`lxc 8/10`, the hottest sensor); the boot log carries the node's
-  facts (pve version, kernel, cores, RAM, the running LXCs, disks with temperatures, storages with free space,
-  firewall, tailscale, updates); the `top(1)` table lists the LXCs under the okes (vmid, name, state, cpu, uptime,
+  facts (pve version, kernel, cores, RAM, the running guests (CT and VM counts), disks with temperatures, storages with free space,
+  firewall, tailscale, updates); the `top(1)` table lists the guests under the okes (vmid, name, state, cpu, uptime,
   mem, tags); the pieces on the grid follow the running guests (1 to 4 at the next batch); node events become
   `wall(1)` broadcasts and dmesg lines with Koos's comment (guest start/stop, backup finished/failed, disk warm or
   sick, storage low, firewall down, tailscale offline, updates waiting, a reboot = Eskom was here and the town goes

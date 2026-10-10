@@ -3,10 +3,11 @@
 The probe's snapshot drives the stage exactly where lekker read /proc: the CPU drives the fire, the load and
 the uptime go on the status line and stamp the kernel log.  On top of that, lekker-style:
   - the boot log gets the node's facts (pve, kernel, CPUs, memory, guests, disks, storages, firewall, tailscale)
-  - the top(1) table on tall screens lists the LXCs (vmid, name, state, cpu, uptime, mem) under the okes
+  - the top(1) table on tall screens lists the guests, containers and VMs (vmid, name, state, cpu, uptime,
+    mem, lxc|qemu) under the okes
   - the meat on the grid follows the running guests: the next batch has 1..4 pieces
   - the node's events become wall(1) broadcasts and dmesg lines, and Koos says something about them
-    (guest start/stop, backup finished/failed, disk warm, storage low, firewall down, tailscale offline,
+    (guest start/stop, backup finished/failed, disk warm, storage low, firewall enabled but stopped, tailscale gone,
     updates waiting, a reboot = Eskom was here, and the probe failing = the fire dying down)
   - Dokter Disk reads the SMART facts the probe already read (never a self-test)
 """
@@ -27,8 +28,8 @@ SPOKEN = {"hello", "guest_started", "guest_stopped", "guest_new", "guest_vanishe
           "node_cpu_ok", "sensor_hot", "unprivileged", "zpool_degraded", "guest_cpu_high"}
 LOG_TEXT = {
     "hello": "node: {subject} probe deur, die braai ken die plaas",
-    "guest_mem_high": "pct: {subject} se geheue is vol",
-    "guest_locked": "pct: {subject} is gesluit (backup of snapshot)",
+    "guest_mem_high": "gaste: {subject} se geheue is vol",
+    "guest_locked": "gaste: {subject} is gesluit (backup of snapshot)",
     "node_cpu_ok": "thermal: host cpu weer rustig",
     "node_load_high": "load: host dra swaar",
     "node_mem_ok": "mem: host geheue weer oop",
@@ -41,14 +42,15 @@ LOG_TEXT = {
     "task_failed": "taak: {subject} het gefaal",
     "net_busy": "net: lyn besig, {subject}",
     "sizzle": "grid0: tsss",
-    "guest_started": "pct: {subject} gestart, 1 bord bygesit",
-    "guest_stopped": "pct: {subject} gestop, bord weggevat",
-    "guest_new": "pct: nuwe gas {subject} op die lys",
-    "guest_vanished": "pct: {subject} is van die lys af",
-    "guest_cpu_high": "pct: {subject} sweet (cpu hoog)",
-    "guest_cpu_ok": "pct: {subject} het afgekoel",
+    "guest_started": "gaste: {subject} gestart, 1 bord bygesit",
+    "guest_stopped": "gaste: {subject} gestop, bord weggevat",
+    "guest_new": "gaste: nuwe gas {subject} op die lys",
+    "guest_vanished": "gaste: {subject} is van die lys af",
+    "guest_cpu_high": "gaste: {subject} sweet (cpu hoog)",
+    "guest_cpu_ok": "gaste: {subject} het afgekoel",
     "backup_started": "vzdump: backup van {subject} begin",
     "backup_ok": "vzdump: backup van {subject} klaar, OK",
+    "backup_warn": "vzdump: backup van {subject} klaar, met waarskuwings",
     "backup_failed": "vzdump: backup van {subject} het GEFAAL",
     "disk_warm": "smart: {subject} word warm",
     "disk_hot": "smart: {subject} is TE WARM",
@@ -56,9 +58,9 @@ LOG_TEXT = {
     "disk_unhealthy": "smart: {subject} is SIEK, backup aanbeveel",
     "storage_high": "pvesm: {subject} raak vol, hout raak min",
     "storage_full": "pvesm: {subject} is VOL",
-    "firewall_down": "hek0: pve-firewall loop nie, die hek staan OOP",
+    "firewall_down": "hek0: pve-firewall is aan maar loop NIE, die hek staan OOP",
     "firewall_up": "hek0: pve-firewall loop, hek toe",
-    "tailscale_down": "toring: tailscale offline, 0 strepies",
+    "tailscale_down": "toring: tailscale weg, 0 strepies",
     "tailscale_up": "toring: tailscale online",
     "updates": "apt: {subject} pakkette wag vir opdatering",
     "reboot": "eskom: die host het herbegin (Eskom was hier)",
@@ -70,6 +72,9 @@ LOG_TEXT = {
     "sensor_hot": "sensors: {subject} te warm",
     "unprivileged": "probe: nie root nie, half blind",
 }
+
+
+FIREWALL_WORD = {"on": "loop", "off": "af", "fault": "is aan maar loop NIE"}
 
 
 class Node:
@@ -105,7 +110,7 @@ class Node:
         want = 1 if running <= 1 else 2 if running <= 3 else 3 if running <= 6 else 4
         if want != b.meat_count:
             b.meat_count = want
-            b.logmsg(f"grid0: {running} LXCs op, volgende batch kry {want} stuk{'ke' if want != 1 else ''}", True)
+            b.logmsg(f"grid0: {running} gaste op, volgende batch kry {want} stuk{'ke' if want != 1 else ''}", True)
         b.FIREMOD.pop("nd_down", None)
 
     def probe_down(self) -> None:
@@ -168,13 +173,15 @@ class Node:
         if s is None:
             return [["w", "node: wag vir die eerste probe..."]]
         n = s.node
+        ct, vm = s.guest_kinds
         out = [["w", f"pve: {n.pveversion or '?'} op {n.hostname} ({n.cpus} kerne, {human_bytes(n.mem_total)} RAM)"],
-               ["w", f"pct: {len(s.running_guests)} van {len(s.guests)} LXCs loop: "
-                     + ", ".join(g.name for g in s.running_guests[:6]) + ("..." if len(s.running_guests) > 6 else "")],
+               ["w", f"gaste: {len(s.running_guests)} van {len(s.guests)} loop ({ct} CT, {vm} VM)"
+                     + (": " + ", ".join(g.name for g in s.running_guests[:6]) + ("..." if len(s.running_guests) > 6 else "")
+                        if s.running_guests else "")],
                ["w", "disks: " + (", ".join(f"{d.name} {d.kind}" + (f" {int(d.temp)}C" if d.temp is not None else "") for d in s.disks) or "geen")],
                ["w", "pvesm: " + (", ".join(f"{st.name} {st.free_pct:.0f}% vry" for st in s.storage) or "geen stoor")],
-               ["w", "hek0: pve-firewall " + ("loop" if s.firewall_running else "loop NIE" if s.firewall_running is False else "onbekend")
-                     + "; toring: tailscale " + ("online" if (s.tailscale and s.tailscale.online) else "offline")
+               ["w", "hek0: pve-firewall " + FIREWALL_WORD.get(s.firewall_state, "onbekend")
+                     + "; toring: tailscale " + ("n/a" if s.tailscale is None else "online" if s.tailscale.online else "offline")
                      + f"; apt: {s.updates if s.updates is not None else '?'} updates"]]
         return out
 
@@ -182,7 +189,7 @@ class Node:
         s = self.snap
         f = []
         if s is not None:
-            f.append([4.5, f"lxc {len(s.running_guests)}/{len(s.guests)}"])
+            f.append([4.5, f"gaste {len(s.running_guests)}/{len(s.guests)}"])
             hs = s.hottest_sensor
             if hs:
                 f.append([6.8, f"{hs.label.split()[0].lower()} {int(hs.temp)}C"])
@@ -194,7 +201,7 @@ class Node:
         return len(self.snap.guests) if self.snap is not None else 0
 
     def top_rows(self, t: float) -> list[tuple[str, str]]:
-        """Every LXC: the running ones by cpu, then the stopped ones."""
+        """Every guest, containers and VMs: the running ones by cpu, then the stopped ones."""
         s = self.snap
         if s is None:
             return []
@@ -205,7 +212,8 @@ class Node:
             st = "T" if not g.running else "R" if g.cpu_pct > 20 else "S"
             tm = g.uptime if g.running else 0
             rows.append((fmt % (g.vmid, g.name[:8], 20, 0, st, "%.1f" % g.cpu_pct, "%d:%02d" % (int(tm / 3600), int(tm % 3600 / 60)),
-                                ("lxc --mem=%d%%" % int(g.mem_pct) if g.running else "lxc --gestop") + (" " + ",".join(g.tags[:2]) if g.tags else "")),
+                                (("%s --mem=%d%%" % (g.kind, int(g.mem_pct))) if g.running else "%s --gestop" % g.kind)
+                                + (" " + ",".join(g.tags[:2]) if g.tags else "")),
                          "W" if st == "R" else "w" if g.running else "b"))
         return rows
 
@@ -233,7 +241,7 @@ def sayings_wall(ev: Event) -> str:
     if k == "storage_high":
         return f"pvesm: {subj} raak vol. Soos die kraal in lamtyd."
     if k == "firewall_down":
-        return "hek0: pve-firewall loop NIE. Die plaashek staan oop -- maak toe!"
+        return "hek0: pve-firewall is aan maar loop NIE. Die plaashek staan oop -- maak toe!"
     if k == "zpool_degraded":
         return f"zfs: {subj} is gedegradeer. Een disk is lam."
     if k == "reboot":

@@ -54,7 +54,7 @@ def test_probe_script_is_stdlib_only_and_runs_here():
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     doc = mod.collect()
-    assert doc["probe_version"] == 1
+    assert doc["probe_version"] == 2
     assert doc["node"]["hostname"]
     assert doc["node"]["cpu_pct"] is not None
     assert isinstance(doc["network"], list)

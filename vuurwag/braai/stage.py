@@ -32,7 +32,8 @@ class Stage:
         self.b = Braai(cols, rows, seed=seed, host=host, kernel=kernel, user=user, green=green)
         self.truecolor = truecolor
         latlon = weather.latlon if weather else (-25.84, 28.24)
-        self.weer = Weer(self.b, weather_fn=(weather.weather if weather else None), latlon=latlon, clock_offset=clock_offset)
+        self.weer = Weer(self.b, weather_fn=(weather.weather if weather else None), latlon=latlon, clock_offset=clock_offset,
+                         latlon_fn=(lambda: weather.latlon) if weather else None)
         self.party = Party(self.b, clock_offset=clock_offset)
         self.kuier = Kuier(self.b)
         self.node = Node(self.b, kuier=self.kuier)
