@@ -143,5 +143,25 @@ for b in pve.example.lan 192.0.2.10:8787 '[::1]' 'x;id'; do
     if (parse_args --bind "$b") >/dev/null 2>&1; then bad "bind accepted: '$b'"; else ok "bind rejected: '$b'"; fi
 done
 
+# default 0.0.0.0 (Tailscale, DHCP); --bind is opt-in
+NODE_IP=192.0.2.10 OPT_BIND=""
+expect_eq "bind: default is every address even with a primary IPv4" "$(default_bind 2>/dev/null)" "0.0.0.0"
+OPT_BIND=192.0.2.10
+expect_eq "bind: --bind IP is used as given" "$(default_bind 2>/dev/null)" "192.0.2.10"
+OPT_BIND=""
+
+# the unguarded-page warning: no pve-firewall vs a disabled one
+ENV_FILE="$TMP/none.env"
+if command -v pve-firewall >/dev/null 2>&1; then
+    ok "warning: no pve-firewall found (skipped: this host has a real pve-firewall)"
+else
+    expect_eq "warning: no pve-firewall found" "$(fw_unguarded_warning 8787 2>&1 | grep -c '^!! no pve-firewall found')" "1"
+fi
+# shellcheck disable=SC2329  # found by fw_unguarded_warning's 'command -v pve-firewall'
+pve-firewall() { echo "Status: disabled/running"; }
+expect_eq "warning: pve-firewall disabled" "$(fw_unguarded_warning 8787 2>&1 | grep -c 'pve-firewall is DISABLED')" "1"
+expect_eq "warning: names 0.0.0.0 when nothing is configured" "$(fw_unguarded_warning 8787 2>&1 | grep -c '0.0.0.0:8787')" "1"
+unset -f pve-firewall
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -11,7 +11,7 @@
 #   --port N          web port (default 8787)
 #   --lan CIDR        LAN allowed to the web port (default: the network of the node's primary interface)
 #   --public-url URL  URL the browser uses (default: http://<node ip>:<port>)
-#   --bind IP         address the web page listens on (default: the node's primary IPv4; 0.0.0.0 = everywhere)
+#   --bind IP         address the web page listens on (default 0.0.0.0, every address; opt-in to narrow it)
 #   --fps N           frames a second, 1-20 (default 10; 4 for slow TV browsers)
 #   --ref REF         git ref to install (default main)
 #   --check           preflight and status only; changes nothing
@@ -62,7 +62,7 @@ Vuurwag installer - run as root on the Proxmox node:
   --lan CIDR        LAN allowed to the web port   --public-url U  URL the browser uses
   --fps N           frames a second, 1-20         --ref REF       git ref (default main)
   --check           status only, changes nothing  --uninstall     remove vuurwag (--yes: no questions)
-  --bind IP         web listen address (default: the node's primary IPv4; 0.0.0.0 = everywhere)
+  --bind IP         web listen address (default 0.0.0.0 = every address, Tailscale included)
   --no-pve-check    allow non-Proxmox hosts       --local-src P   install from a dir or .tar.gz
 No flags: install the files and the venv, enable nothing, print the next steps.
 EOF
@@ -380,12 +380,23 @@ default_place() {
     "${VENV}/bin/python" -c 'from vuurwag.weather import DEFAULT_PLACE; print(DEFAULT_PLACE)' 2>/dev/null || true
 }
 
-# the address vuurwag-web listens on: --bind, else the node's primary IPv4, else every address (with a warning)
+# the address vuurwag-web listens on: --bind if given, else every address. 0.0.0.0 keeps the page reachable over
+# Tailscale and survives a DHCP change of the node's address; --bind IP narrows it (opt-in).
 default_bind() {
     if [ -n "$OPT_BIND" ]; then echo "$OPT_BIND"; return 0; fi
-    if [ -n "$NODE_IP" ]; then echo "$NODE_IP"; return 0; fi
-    warn "no primary IPv4 found: vuurwag-web will listen on every address (0.0.0.0); pass --bind IP to narrow it"
     echo "0.0.0.0"
+}
+
+# the loud line for a page without login that pve-firewall does not guard
+fw_unguarded_warning() {  # port
+    local where
+    where="$(env_get VUURWAG_BIND)"; where="${where:-0.0.0.0}"
+    if command -v pve-firewall >/dev/null 2>&1; then
+        warn "pve-firewall is DISABLED on this node: the page (no login) is open to every network that can reach ${where}:$1."
+    else
+        warn "no pve-firewall found: the page (no login) is open to every network that can reach ${where}:$1."
+    fi
+    warn "  Keep it on a trusted LAN or Tailscale, or narrow it with --bind IP."
 }
 
 warn_place() {  # the place we ended up with -> a loud line when it is the default or the README placeholder
@@ -475,8 +486,8 @@ firewall_add() {
     rule="$(fw_rule "$lan" "$port")"
     file="$(fw_file)"
     if ! fw_enabled; then
-        warn "pve-firewall is DISABLED on this node: the page (no login) is open to every network that can reach"
-        warn "  $(env_get VUURWAG_BIND):${port}. Keep it on a trusted LAN, or enable pve-firewall and add under [RULES] in ${file}:"
+        fw_unguarded_warning "$port"
+        info "with pve-firewall enabled, this rule under [RULES] in ${file} would admit only the LAN:"
         info "  ${rule}"
         return 0
     fi
@@ -747,11 +758,10 @@ do_check() {
         else
             info "firewall rule: absent (would be: $(fw_rule "$lan" "$port"))"
         fi
-        if ! fw_enabled; then
-            info "pve-firewall: DISABLED - the page is open to every network that can reach $(env_get VUURWAG_BIND):${port}"
-        fi
+        if ! fw_enabled; then fw_unguarded_warning "$port" 2>&1; fi
     else
         info "pve-firewall: not found"
+        fw_unguarded_warning "$port" 2>&1
     fi
     local host place
     host="$(web_probe_host)"

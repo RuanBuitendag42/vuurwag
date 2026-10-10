@@ -3,8 +3,8 @@
 # Runs as root because the probe needs pvesh/pct/pvesm/smartctl; it probes LOCALLY (no ssh at all: the
 # app finds pvesh on the node itself). textual-serve starts one app process per browser tab and hands it
 # this service's environment, so VUURWAG_PLACE reaches the weather from here.
-# The page has no authentication: it listens on VUURWAG_BIND only (install.sh: the node's primary IPv4,
-# --bind to change; 0.0.0.0 = every network the node is on) and install.sh adds a pve-firewall rule for
+# The page has no authentication: it listens on VUURWAG_BIND (default 0.0.0.0, every network the node is
+# on, Tailscale included; install.sh --bind IP narrows it) and install.sh adds a pve-firewall rule for
 # VUURWAG_LAN when the firewall is enabled. VUURWAG_PUBLIC_URL must be the address the TV uses: textual-serve builds the page's
 # websocket URL from it.
 # Each tab is 'python -P -m vuurwag': -P and PYTHONSAFEPATH keep the cwd off sys.path, and the cwd is the

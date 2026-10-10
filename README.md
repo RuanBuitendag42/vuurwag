@@ -31,7 +31,7 @@ Run as root on a Proxmox VE 8 or 9 node (Python 3.11 / 3.13 are already there). 
 | `--tv` | enable `vuurwag-web` (the page for the TV) and allow `--lan` to its port in pve-firewall |
 | `--monitor` | enable `vuurwag-kiosk` (cage + foot on tty1), only after a preflight passes |
 | `--place "Town, Country"` | town for the weather (replace the example with your own town; `Town, FR`-style ISO codes work too) |
-| `--bind IP` | address the page listens on (default: the node's primary IPv4; `0.0.0.0` = every network, needed for Tailscale) |
+| `--bind IP` | address the page listens on (default `0.0.0.0`: every network, Tailscale included, and a DHCP change cannot break it; give one IP to narrow it) |
 | `--port N` | web port (default 8787) |
 | `--lan CIDR` | LAN allowed to the port (default: the network of the node's primary interface, printed) |
 | `--public-url URL` | the URL the TV uses (default `http://<node ip>:<port>`; set it for a DNS name or Tailscale) |
@@ -68,7 +68,7 @@ What lands where:
 ```
 VUURWAG_PLACE="Pierre van Ryneveld, Centurion, South Africa"   # the default; change it to your town
 VUURWAG_PORT="8787"
-VUURWAG_BIND="192.0.2.10"
+VUURWAG_BIND="0.0.0.0"
 VUURWAG_LAN="192.0.2.0/24"
 VUURWAG_PUBLIC_URL="http://192.0.2.10:8787"
 VUURWAG_FPS="10"
@@ -146,10 +146,11 @@ firewall rule, re-enables `getty@tty1`, then asks before removing the `vuurwag` 
 ## Security
 
 - **textual-serve has no authentication.** Anyone who can reach the port sees the node's guests, disks and load.
-  Keep it on the LAN or Tailscale; never port-forward it. The page listens on the node's primary IPv4 only
-  (`--bind`; `0.0.0.0` puts it on every network the node is on, Tailscale included).
+  Keep it on the LAN or Tailscale; never port-forward it. By default the page listens on every address of the
+  node (`0.0.0.0`, so Tailscale works); `--bind IP` narrows it to one address.
 - **pve-firewall is disabled by default on Proxmox.** Then the installer's rule does nothing and the page is open
-  to everything that can reach the bind address; `--tv` and `--check` say so loudly. With the firewall enabled, the
+  to everything that can reach the bind address; `--tv` and `--check` say so loudly (also when there is no
+  pve-firewall at all). With the firewall enabled, the
   rule admits only `--lan`.
 - **The probe is read-only**: `pvesh get`, `pct list`, `pvesm status`, `smartctl -a` (it never starts a self-test),
   `pve-firewall status`, `zpool list/status`, `sensors`, `tailscale status`. It is `vuurwag/probe/probe.py`,
