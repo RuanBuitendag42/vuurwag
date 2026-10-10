@@ -6,11 +6,12 @@
 # on your Proxmox node, as root
 curl -fsSL https://raw.githubusercontent.com/RuanBuitendag42/vuurwag/main/install.sh | bash -s -- --tv
 # monitor plugged into the node as well:
-curl -fsSL https://raw.githubusercontent.com/RuanBuitendag42/vuurwag/main/install.sh | bash -s -- --tv --monitor --place "Your Town, South Africa"
+curl -fsSL https://raw.githubusercontent.com/RuanBuitendag42/vuurwag/main/install.sh | bash -s -- --tv --monitor --place "Bloemfontein, South Africa"
 ```
 
 A braai in ASCII art for your Proxmox VE node: three okes and a brakkie around a half-drum braai under the Southern
-Cross, on a plaas. The fire burns with the node's CPU, the LXCs are on the grid and in a `top(1)` table, guests
+Cross, on a plaas. The fire burns with the node's CPU, the guests (containers and VMs) are on the grid and in a
+`top(1)` table, guests
 starting and stopping, backups, disks and the firewall turn into `wall(1)` broadcasts and Koos's comments, and the
 real weather (Open-Meteo, no key) sets the sky. Show it on a TV in a browser, on the monitor plugged into the node, or
 in any terminal. The only interaction is a keyboard full of easter eggs (`?` lists them).
@@ -29,7 +30,8 @@ Run as root on a Proxmox VE 8 or 9 node (Python 3.11 / 3.13 are already there). 
 | *(none)* | install the files and the venv, enable nothing, print the next steps |
 | `--tv` | enable `vuurwag-web` (the page for the TV) and allow `--lan` to its port in pve-firewall |
 | `--monitor` | enable `vuurwag-kiosk` (cage + foot on tty1), only after a preflight passes |
-| `--place "Town, Country"` | town for the weather |
+| `--place "Town, Country"` | town for the weather (replace the example with your own town; `Town, FR`-style ISO codes work too) |
+| `--bind IP` | address the page listens on (default: the node's primary IPv4; `0.0.0.0` = every network, needed for Tailscale) |
 | `--port N` | web port (default 8787) |
 | `--lan CIDR` | LAN allowed to the port (default: the network of the node's primary interface, printed) |
 | `--public-url URL` | the URL the TV uses (default `http://<node ip>:<port>`; set it for a DNS name or Tailscale) |
@@ -41,7 +43,7 @@ Run as root on a Proxmox VE 8 or 9 node (Python 3.11 / 3.13 are already there). 
 What lands where:
 
 - `apt-get install --no-install-recommends python3-venv smartmontools lm-sensors curl iproute2` (plus
-  `cage foot seatd fonts-dejavu fontconfig openssh-client` with `--monitor`). The probe calls `pvesh`, `pct`, `pvesm`, `pve-firewall`,
+  `cage foot seatd fonts-dejavu fontconfig openssh-client` with `--monitor`). The probe calls `pvesh`, `pct`, `qm`, `pvesm`, `pve-firewall`,
   `pveversion`, `lsblk`, `smartctl`, `zpool`, `sensors` and `tailscale`; the last three are optional.
 - `/opt/vuurwag/src` — the source tarball of `--ref` from GitHub (swapped in whole on every run).
 - `/opt/vuurwag/.venv` — a plain `python3 -m venv`; dependencies installed from `requirements.txt`, which is
@@ -66,13 +68,18 @@ What lands where:
 ```
 VUURWAG_PLACE="Pierre van Ryneveld, Centurion, South Africa"   # the default; change it to your town
 VUURWAG_PORT="8787"
+VUURWAG_BIND="192.0.2.10"
 VUURWAG_LAN="192.0.2.0/24"
 VUURWAG_PUBLIC_URL="http://192.0.2.10:8787"
 VUURWAG_FPS="10"
 ```
 
 Edit it and `systemctl restart vuurwag-web vuurwag-kiosk`, or rerun the installer with the flag. The place is
-geocoded most-specific-part first and falls back part by part, so "Suburb, Town, Country" works.
+geocoded most-specific-part first and falls back part by part, so "Suburb, Town, Country" works. Any country
+works: a name the app knows or an ISO code ("Lyon, FR") filters the search; any other country name is searched
+without a filter and used to pick among the results. With no `--place` the installer writes the default above and
+warns; the README's "Your Town" placeholder is refused. `VUURWAG_STORAGE_WARN` / `VUURWAG_STORAGE_CRIT` (default
+85 / 95) set when a storage that holds guests counts as filling up; backup/ISO-only storages are left alone.
 
 ## On the TV
 
@@ -139,7 +146,11 @@ firewall rule, re-enables `getty@tty1`, then asks before removing the `vuurwag` 
 ## Security
 
 - **textual-serve has no authentication.** Anyone who can reach the port sees the node's guests, disks and load.
-  Keep it on the LAN or Tailscale; the installer's firewall rule only admits `--lan`. Never port-forward it.
+  Keep it on the LAN or Tailscale; never port-forward it. The page listens on the node's primary IPv4 only
+  (`--bind`; `0.0.0.0` puts it on every network the node is on, Tailscale included).
+- **pve-firewall is disabled by default on Proxmox.** Then the installer's rule does nothing and the page is open
+  to everything that can reach the bind address; `--tv` and `--check` say so loudly. With the firewall enabled, the
+  rule admits only `--lan`.
 - **The probe is read-only**: `pvesh get`, `pct list`, `pvesm status`, `smartctl -a` (it never starts a self-test),
   `pve-firewall status`, `zpool list/status`, `sensors`, `tailscale status`. It is `vuurwag/probe/probe.py`,
   standard library only; read it.
@@ -156,11 +167,12 @@ firewall rule, re-enables `getty@tty1`, then asks before removing the `vuurwag` 
 |---|---|---|
 | Monitor black, no login prompt on tty1; `systemctl status vuurwag-kiosk` shows `status=217/USER` | The kiosk unit was enabled before the `vuurwag` user, cage, foot and seatd existed; its `Conflicts=getty@tty1` had stopped the login prompt | `systemctl disable --now vuurwag-kiosk; systemctl enable --now getty@tty1`, then rerun with `--monitor`. The installer now refuses to enable it until the preflight passes, and `OnFailure=` brings getty back |
 | `vuurwag-web` in a restart loop; journal says it cannot write `/root/.cache` | An old unit ran `uv run` under `ProtectHome=read-only` | Rerun the installer: the unit now runs `/opt/vuurwag/.venv/bin/vuurwag` directly; uv is not used on the node |
-| TV page loads but the network is dead and there are no LXCs | An old unit told the root web service to probe over `--ssh root@127.0.0.1`, and root had no key for itself | Rerun the installer: the web unit probes locally (no `--ssh`). `systemctl cat vuurwag-web` must show no `--ssh` |
+| TV page loads but the network is dead and there are no guests | An old unit told the root web service to probe over `--ssh root@127.0.0.1`, and root had no key for itself | Rerun the installer: the web unit probes locally (no `--ssh`). `systemctl cat vuurwag-web` must show no `--ssh` |
 | Monitor shows only part of the scene (no tree, tower or bakkie) | The font in foot.ini was not installed; foot fell back to a wide font, too few columns | `apt install fonts-dejavu`, `font=DejaVu Sans Mono:size=11` for 1080p (`fc-list \| grep "DejaVu Sans Mono"` to check) |
 | Colours on the monitor look washed out | foot's default palette | Use the `[colors]` block from `deploy/foot.ini` (an existing foot.ini is never overwritten) |
 | TV cannot reach the page (times out) but `curl -I http://127.0.0.1:8787` on the node works | pve-firewall's ingress policy is DROP | `--check` shows the rule; `--tv` adds it when the firewall is enabled. By hand, under `[RULES]` in `/etc/pve/nodes/<node>/host.fw`: `IN ACCEPT -source <lan> -p tcp -dport 8787 -log nolog` |
 | TV page shows an old version after an upgrade; `install.sh` died with "No module named pip" | A hand install left a flat `/opt/vuurwag/vuurwag/` package (imported from the cwd instead of the venv) and a uv-made venv without pip | Rerun the installer: it removes the old layout, rebuilds the venv, and the web unit runs `python -P -m vuurwag` from `/var/lib/vuurwag` |
+| `--monitor` says "DejaVu Sans Mono not found" although `fc-list` shows it | Older installer: `fc-list \| grep -q` under `set -o pipefail` fails with SIGPIPE once grep has its match | Rerun: the check now uses `fc-match`, the font file and the package, and prints what fontconfig sees if it still fails |
 | TV page loads, then stays black / "connecting" | `VUURWAG_PUBLIC_URL` is not an address the TV can reach (the websocket is built from it) | Rerun with `--public-url http://<address the TV uses>:8787` |
 | *"probe: geen antwoord"* in the log and a low fire | The probe failed (ssh down, node rebooting) | It retries every interval; `journalctl -u vuurwag-kiosk` |
 | Dokter Disk sees no disks | `smartctl` needs root | Run the probe as root (`--ssh root@...`, or the web unit) |
@@ -199,7 +211,7 @@ works if passwordless sudo is set up. Flags: `--fps N`, `-g`/`--green` (phosphor
   screen size, the fire, smoke, meat and banter mechanics, `wall(1)`, the `top(1)` table, the boot log, and the
   extras: weather and time of day, the party (vuurwerk, sokkie, songs, rugby, the special days), the kuier
   (Tannie, Oom, Eskom, hout, more meat, the town) and Dokter Disk. Pure 7-bit ASCII in the 8 ANSI colours.
-- **Added**: the node in lekker's idiom (CPU drives the fire, LXCs on the grid and in `top`, node events as walls and
+- **Added**: the node in lekker's idiom (CPU drives the fire, containers and VMs on the grid and in `top`, node events as walls and
   dmesg lines; Dokter Disk only reads SMART), Open-Meteo driving the weather (plus a sixth state, mis), the plaas
   (windpomp, dam, kraal, critters, new skits), more South African special days, and the whole voice in farm
   Afrikaans first, SA English second.
