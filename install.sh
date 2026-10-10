@@ -750,9 +750,11 @@ do_install() {
     apt_install "${pkgs[@]}"
     python_ok || die "python3 >= 3.11 is still not available after apt"
     detect_network
-    clean_legacy
     fetch_source
     build_venv
+    # only now that the new install runs (its smoke test uses -P, so the old tree cannot interfere):
+    # a failed download or venv build leaves the hand-deployed files where they were
+    clean_legacy
     write_env
     install_units
     # an upgrade: restart what is already running so it picks up the new code and config

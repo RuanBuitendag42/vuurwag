@@ -113,11 +113,17 @@ uv-made venv, units with `uv run` in them):
 1. On a node that is behind on updates, run `apt update && apt full-upgrade` first, so the installer's
    `apt-get install` does not pull half an upgrade.
 2. Stop the old units: `systemctl disable --now vuurwag-web vuurwag-kiosk`.
-3. Run the installer **over SSH, not from a shell on tty1**: `--monitor` starts the kiosk on tty1, which takes that
+3. Before `--monitor`, delete the old kiosk key: `rm -f ~vuurwag/.ssh/id_ed25519*`. The installer then makes a new
+   key with the comment `vuurwag-kiosk@<node>`. If the old key stays, its line keeps its old comment, and
+   `--uninstall` will not find that line.
+4. Check `/etc/pve/priv/authorized_keys` by hand for an old, unrestricted vuurwag line and delete it. The installer
+   only edits lines for its own key and never touches lines with other keys.
+5. Run the installer **over SSH, not from a shell on tty1**: `--monitor` starts the kiosk on tty1, which takes that
    console away from you. `--check` first shows what it will find.
-4. The installer removes the old flat layout from `/opt/vuurwag` (it prints every file it removes), rebuilds the
-   pip-less venv, and overwrites the old unit files. A firewall rule you added by hand for the port is kept.
-5. Afterwards: `systemctl is-enabled getty@tty1` must say `enabled`. The old instructions disabled it; if it is
+6. The installer rebuilds the pip-less venv. Only once the new install runs does it remove the old flat layout from
+   `/opt/vuurwag` (it prints every file it removes), so a failed download leaves those files where they were. It
+   overwrites the old unit files and keeps a firewall rule you added by hand for the port.
+7. Afterwards: `systemctl is-enabled getty@tty1` must say `enabled`. The old instructions disabled it; if it is
    `disabled`, run `systemctl enable getty@tty1`, so tty1 gets a login prompt back if the kiosk ever stops.
 
 ## Uninstalling

@@ -77,5 +77,23 @@ clean_legacy >/dev/null
 expect_eq "legacy: old files removed" "$(find "$PREFIX" -mindepth 1 -maxdepth 1 -printf '%f ' | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ')" ".venv src "
 if legacy_layout; then bad "legacy: still detected after cleanup"; else ok "legacy: clean after cleanup"; fi
 
+# ── a failed download must not cost the old install ───────────────────────────
+# do_install with the system-touching steps stubbed out and the real fetch_source pointed at nothing
+PREFIX="$TMP/opt2" SRC_DIR="$TMP/opt2/src" VENV="$TMP/opt2/.venv"
+mkdir -p "$PREFIX/vuurwag" "$PREFIX/deploy" "$VENV/bin"
+touch "$PREFIX/pyproject.toml" "$PREFIX/uv.lock" "$PREFIX/vuurwag/__init__.py"
+before="$(cd "$PREFIX" && find . | LC_ALL=C sort)"
+(
+    apt_install() { :; }
+    python_ok() { :; }
+    detect_network() { :; }
+    OPT_NO_PVE=1 OPT_LOCAL_SRC="$TMP/nonexistent"
+    do_install
+) >/dev/null 2>&1
+rc=$?
+expect_eq "failed download: do_install fails" "$([ "$rc" != 0 ] && echo failed)" "failed"
+expect_eq "failed download: the legacy layout is untouched" "$(cd "$PREFIX" && find . | LC_ALL=C sort)" "$before"
+if legacy_layout; then ok "failed download: still a legacy layout (nothing half-removed)"; else bad "failed download: legacy layout gone"; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
