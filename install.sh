@@ -33,8 +33,11 @@ KIOSK_USER="vuurwag"
 KIOSK_HOME="/home/${KIOSK_USER}"
 FW_TAG="# vuurwag-web"
 KEY_TAG="vuurwag-kiosk@"
+RUN_DIR="/var/lib/vuurwag"   # the web unit's WorkingDirectory: nothing importable in it
+# What the 2026-10-09 hand deployment rsynced straight into /opt/vuurwag (now under src/).
+LEGACY_ITEMS=(vuurwag deploy tests screenshots pyproject.toml uv.lock README.md DESIGN.md .gitignore .python-version .pytest_cache)
 BASE_PKGS=(python3 python3-venv smartmontools lm-sensors curl ca-certificates iproute2)
-MONITOR_PKGS=(cage foot seatd fonts-dejavu openssh-client)
+MONITOR_PKGS=(cage foot seatd fonts-dejavu fontconfig openssh-client)
 
 OPT_TV=0 OPT_MONITOR=0 OPT_CHECK=0 OPT_UNINSTALL=0 OPT_YES=0 OPT_NO_PVE=0
 OPT_PLACE="" OPT_PORT="" OPT_LAN="" OPT_PUBLIC_URL="" OPT_FPS="" OPT_REF="main" OPT_LOCAL_SRC=""
@@ -96,7 +99,7 @@ parse_args() {
     if [ -n "$OPT_LAN" ] && ! [[ "$OPT_LAN" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
         die "--lan must be an IPv4 CIDR such as 192.0.2.0/24"
     fi
-    if [ -n "$OPT_PUBLIC_URL" ] && ! [[ "$OPT_PUBLIC_URL" =~ ^https?://[A-Za-z0-9.:_\[\]-]+(/[A-Za-z0-9._~/-]*)?$ ]]; then
+    if [ -n "$OPT_PUBLIC_URL" ] && ! valid_public_url "$OPT_PUBLIC_URL"; then
         die "--public-url must look like http://host:port"
     fi
     [[ "$OPT_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || die "--ref may only contain letters, digits and . _ / -"
@@ -184,6 +187,51 @@ fw_enabled() { command -v pve-firewall >/dev/null 2>&1 && pve-firewall status 2>
 
 fw_rule() { echo "IN ACCEPT -source $1 -p tcp -dport $2 -log nolog ${FW_TAG}"; }
 
+# url -> 0 if it is http(s)://host[:port][/path]; host is a name, an IPv4 or a bracketed [IPv6].
+# Kept in a variable: inside [[ =~ ]] a literal '\]' in a bracket set ends the set early.
+valid_public_url() {
+    local re='^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+    [[ "$1" =~ $re ]]
+}
+
+# host.fw content on stdin, rule, port -> one word on stdout:
+#   present            the exact tagged rule is there
+#   covered <line>     an untagged IN ACCEPT rule for this dport is there (a hand-made one): leave it
+#   add                neither: fw_merge it
+fw_plan() {
+    awk -v rule="$1" -v port="$2" -v tag="$FW_TAG" '
+        $0 == rule { found = "present"; exit }
+        /^[[:space:]]*#/ { next }
+        index($0, tag) > 0 { next }
+        $0 ~ /^[[:space:]]*IN[[:space:]]+ACCEPT([[:space:]]|$)/ && $0 ~ ("-dport[[:space:]]+" port "([[:space:]]|$)") {
+            if (!covered) covered = $0
+        }
+        END { if (found) print found; else if (covered) print "covered " covered; else print "add" }'
+}
+
+# host.fw content on stdin, rule -> the content with any old vuurwag rule replaced by this one,
+# placed first under [RULES] (the section is created if missing).
+fw_merge() {
+    awk -v rule="$1" -v tag="$FW_TAG" '
+        index($0, tag) > 0 { next }
+        { print }
+        toupper($0) ~ /^\[RULES\]/ && !done { print rule; done = 1 }
+        END { if (!done) { print ""; print "[RULES]"; print ""; print rule } }'
+}
+
+# authorized_keys on stdin, node -> the same without the restricted line whose key comment is exactly
+# vuurwag-kiosk@<node>; other nodes' kiosk lines (a cluster shares this file) stay.
+ak_without_node_key() {
+    awk -v want=" ${KEY_TAG}$1" '
+        { line = $0; sub(/[[:space:]]+$/, "", line) }
+        index(line, "command=\"python3 -\",restrict ") > 0 && length(line) >= length(want) \
+            && substr(line, length(line) - length(want) + 1) == want { next }
+        { print }'
+}
+
+# 0 if /opt/vuurwag still has the hand deployment's flat layout (package and project files directly in it)
+legacy_layout() { [ -d "${PREFIX}/vuurwag" ] || [ -f "${PREFIX}/pyproject.toml" ] || [ -f "${PREFIX}/uv.lock" ]; }
+
 # ─── the source, the venv, the config ─────────────────────────────────────────
 
 fetch_source() {
@@ -229,17 +277,49 @@ build_venv() {
         if [ "$have" != "$want" ]; then
             info "venv is python ${have}, system is ${want}: rebuilding it"
             rm -rf "$VENV"
+        elif ! "${VENV}/bin/python" -m pip --version >/dev/null 2>&1 </dev/null; then
+            # a venv made by 'uv sync' (the hand deployment) has no pip
+            info "venv has no pip (made by uv?): rebuilding it"
+            rm -rf "$VENV"
         fi
     fi
     [ -x "${VENV}/bin/python" ] || python3 -m venv "$VENV"
     export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1
-    "${VENV}/bin/python" -m pip install --quiet --upgrade pip </dev/null
     "${VENV}/bin/python" -m pip install --quiet --require-hashes -r "${SRC_DIR}/requirements.txt" </dev/null
     "${VENV}/bin/python" -m pip install --quiet --no-deps --force-reinstall "$SRC_DIR" </dev/null
+    smoke_test
+}
+
+# The units run the venv's entry point (kiosk) and textual-serve runs 'python -P -m vuurwag' per tab
+# (web). Try both, from ${PREFIX} on purpose: whatever lies in the cwd must not be what gets imported.
+smoke_test() {
+    local origin
+    origin="$(cd "$PREFIX" && "${VENV}/bin/python" -P -c 'import vuurwag; print(vuurwag.__file__)' 2>/dev/null </dev/null || true)"
+    case "$origin" in
+        "${VENV}/"*) ;;
+        *) die "python -P imports vuurwag from '${origin:-nowhere}', not from ${VENV}" ;;
+    esac
+    if ! (cd "$PREFIX" && "${VENV}/bin/python" -P -m vuurwag --demo --once >/dev/null 2>&1 </dev/null); then
+        die "the new venv does not run: ${VENV}/bin/python -P -m vuurwag --demo --once failed"
+    fi
     if ! "${VENV}/bin/vuurwag" --demo --once >/dev/null 2>&1 </dev/null; then
         die "the new venv does not run: ${VENV}/bin/vuurwag --demo --once failed"
     fi
+    info "ok: imports from ${origin%/__init__.py}"
     info "ok: $("${VENV}/bin/vuurwag" --demo --once 2>/dev/null </dev/null | head -n 1)"
+}
+
+# Remove what the hand deployment rsynced straight into /opt/vuurwag; leaves src/ and .venv alone.
+clean_legacy() {
+    legacy_layout || return 0
+    say "removing the old hand-deployed layout from ${PREFIX}"
+    local item
+    for item in "${LEGACY_ITEMS[@]}"; do
+        if [ -e "${PREFIX}/${item}" ]; then
+            rm -rf "${PREFIX:?}/${item}"
+            info "removed ${PREFIX}/${item}"
+        fi
+    done
 }
 
 default_place() {
@@ -292,6 +372,7 @@ install_units() {
     install -d -m 0755 "$UNIT_DIR"
     install -m 0644 "${SRC_DIR}/deploy/vuurwag-web.service" "${UNIT_DIR}/vuurwag-web.service"
     install -m 0644 "${SRC_DIR}/deploy/vuurwag-kiosk.service" "${UNIT_DIR}/vuurwag-kiosk.service"
+    install -d -m 0755 "$RUN_DIR"
     sctl daemon-reload
 }
 
@@ -311,10 +392,17 @@ firewall_add() {
         info "  ${rule}"
         return 0
     fi
-    if [ -f "$file" ] && grep -qxF "$rule" "$file"; then
-        info "pve-firewall: rule already there (${lan} -> ${port}/tcp)"
-        return 0
-    fi
+    local plan
+    plan="$({ [ -f "$file" ] && cat "$file"; true; } | fw_plan "$rule" "$port")"
+    case "$plan" in
+        present)
+            info "pve-firewall: rule already there (${lan} -> ${port}/tcp)"
+            return 0 ;;
+        covered\ *)
+            info "pve-firewall: an existing rule already opens ${port}/tcp, leaving it as it is:"
+            info "  ${plan#covered }"
+            return 0 ;;
+    esac
     if [ ! -d "$(dirname "$file")" ]; then
         warn "no $(dirname "$file") - is ${NODE_NAME} the Proxmox node name? Add this under [RULES] yourself:"
         info "  ${rule}"
@@ -322,11 +410,7 @@ firewall_add() {
     fi
     say "pve-firewall: allowing ${lan} to ${port}/tcp in ${file}"
     tmp="$(mktemp)"
-    { [ -f "$file" ] && cat "$file"; true; } | awk -v rule="$rule" -v tag="$FW_TAG" '
-        index($0, tag) > 0 { next }
-        { print }
-        toupper($0) ~ /^\[RULES\]/ && !done { print rule; done = 1 }
-        END { if (!done) { print ""; print "[RULES]"; print ""; print rule } }' >"$tmp"
+    { [ -f "$file" ] && cat "$file"; true; } | fw_merge "$rule" >"$tmp"
     # /etc/pve is pmxcfs: write the file in place, never rename over it
     cat "$tmp" >"$file"
     rm -f "$tmp"
@@ -436,7 +520,9 @@ kiosk_preflight() {
     for b in cage foot seatd; do
         if ! command -v "$b" >/dev/null 2>&1; then info "preflight: ${b} is not installed"; bad=1; fi
     done
-    if command -v fc-list >/dev/null 2>&1 && ! fc-list 2>/dev/null | grep -q 'DejaVu Sans Mono'; then
+    if ! command -v fc-list >/dev/null 2>&1; then
+        info "preflight: fc-list not found, cannot check the font (apt install fontconfig)"; bad=1
+    elif ! fc-list 2>/dev/null | grep -q 'DejaVu Sans Mono'; then
         info "preflight: DejaVu Sans Mono not found (apt install fonts-dejavu)"; bad=1
     fi
     if [ ! -e /dev/tty1 ]; then info "preflight: there is no /dev/tty1"; bad=1; fi
@@ -536,8 +622,14 @@ do_check() {
     else
         info "source: not installed"
     fi
-    if [ -x "${VENV}/bin/vuurwag" ] && "${VENV}/bin/python" -c 'import vuurwag' >/dev/null 2>&1; then
-        info "venv: ${VENV} ok ($("${VENV}/bin/python" -V 2>&1))"
+    if legacy_layout; then
+        info "legacy: ${PREFIX} still has the hand-deployed flat layout; an install removes:$(for i in "${LEGACY_ITEMS[@]}"; do [ -e "${PREFIX}/${i}" ] && printf ' %s' "$i"; done; true)"
+    fi
+    local origin
+    origin="$(cd / && "${VENV}/bin/python" -P -c 'import vuurwag; print(vuurwag.__file__)' 2>/dev/null </dev/null || true)"
+    if [ -x "${VENV}/bin/vuurwag" ] && [ -n "$origin" ]; then
+        info "venv: ${VENV} ok ($("${VENV}/bin/python" -V 2>&1), vuurwag from ${origin%/__init__.py})"
+        "${VENV}/bin/python" -m pip --version >/dev/null 2>&1 </dev/null || info "venv: has no pip (made by uv?) - an install rebuilds it"
     else
         info "venv: missing or broken"
     fi
@@ -558,8 +650,12 @@ do_check() {
     if command -v pve-firewall >/dev/null 2>&1; then
         local st; st="$(pve-firewall status 2>/dev/null | head -n 1 || true)"
         info "pve-firewall: ${st:-unknown}"
+        local plan
+        plan="$({ [ -f "$(fw_file)" ] && cat "$(fw_file)"; true; } | fw_plan "$(fw_rule "$lan" "$port")" "$port")"
         if [ -f "$(fw_file)" ] && grep -qF "$FW_TAG" "$(fw_file)"; then
             info "firewall rule: present: $(grep -F "$FW_TAG" "$(fw_file)" | head -n 1)"
+        elif [ "${plan%% *}" = covered ]; then
+            info "firewall rule: ${port}/tcp already opened by an existing rule: ${plan#covered }"
         else
             info "firewall rule: absent (would be: $(fw_rule "$lan" "$port"))"
         fi
@@ -591,15 +687,17 @@ do_uninstall() {
     sctl enable getty@tty1
     if have_systemd && ! systemctl is-active --quiet getty@tty1; then systemctl start getty@tty1 || true; fi
     local ak=/root/.ssh/authorized_keys tmp
-    if [ -f "$ak" ] && grep -qF "$KEY_TAG" "$ak"; then
+    if [ -f "$ak" ] && grep -qF "${KEY_TAG}${NODE_NAME}" "$ak"; then
         tmp="$(mktemp)"
-        awk -v tag="$KEY_TAG" '!(index($0, "command=\"python3 -\",restrict ") > 0 && index($0, " " tag) > 0)' "$ak" >"$tmp"
+        ak_without_node_key "$NODE_NAME" <"$ak" >"$tmp"
+        # on a cluster this file is shared through /etc/pve/priv: only this node's line goes; write in place
         cat "$tmp" >"$ak"
         rm -f "$tmp"
-        info "removed the kiosk key from ${ak}"
+        info "removed this node's kiosk key (${KEY_TAG}${NODE_NAME}) from ${ak}"
     fi
     firewall_remove
     if [ -d "$PREFIX" ]; then rm -rf "$PREFIX"; info "removed ${PREFIX}"; fi
+    if [ -d "$RUN_DIR" ]; then rm -rf "$RUN_DIR"; info "removed ${RUN_DIR}"; fi
     if id "$KIOSK_USER" >/dev/null 2>&1; then
         if confirm "remove the user '${KIOSK_USER}' and ${KIOSK_HOME}?"; then
             pkill -u "$KIOSK_USER" >/dev/null 2>&1 || true
@@ -652,6 +750,7 @@ do_install() {
     apt_install "${pkgs[@]}"
     python_ok || die "python3 >= 3.11 is still not available after apt"
     detect_network
+    clean_legacy
     fetch_source
     build_venv
     write_env
@@ -691,4 +790,7 @@ main() {
     do_install
 }
 
-main "$@"
+# tests/test_install_sh.sh sources this file with VUURWAG_INSTALL_SOURCED=1 to reach the functions
+if [ "${VUURWAG_INSTALL_SOURCED:-0}" != 1 ]; then
+    main "$@"
+fi
